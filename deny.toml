@@ -1,0 +1,49 @@
+# cargo-deny policy: run `cargo deny check` locally, CI runs it on every push.
+# Hackerman is MIT OR Apache-2.0, so only permissive licenses may enter the
+# dependency tree. Copyleft (GPL, LGPL, AGPL) is rejected by omission. MPL-2.0 is
+# allowed because Tauri depends on it and it only covers those crates' own files:
+# it never applies to Hackerman, as long as we use them unmodified.
+
+[graph]
+all-features = true
+
+[advisories]
+version = 2
+yanked = "deny"
+# Each exception says why it can't affect Hackerman. Review them when updating
+# Tauri, and when the Linux and macOS versions of the app are added.
+ignore = [
+    { id = "RUSTSEC-2026-0194", reason = "quick-xml, via Tauri's plist: only ever reads the project's own trusted files, never XML from a network or user" },
+    { id = "RUSTSEC-2026-0195", reason = "quick-xml, via Tauri's plist: only ever reads the project's own trusted files, never XML from a network or user" },
+    { id = "RUSTSEC-2024-0370", reason = "proc-macro-error: unmaintained, no known flaw. Compile-time only, and only on Linux through Tauri's GTK" },
+    { id = "RUSTSEC-2026-0370", reason = "zvariant: unmaintained, no known flaw. Only on Linux, through Tauri's single-instance plugin" },
+    { id = "RUSTSEC-2026-0371", reason = "zbus_names: unmaintained, no known flaw. Only on Linux, through Tauri's single-instance plugin" },
+    { id = "RUSTSEC-2026-0372", reason = "zvariant_derive: unmaintained, no known flaw. Only on Linux, through Tauri's single-instance plugin" },
+]
+
+[licenses]
+version = 2
+confidence-threshold = 0.9
+allow = [
+    "MIT",
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "BSD-3-Clause",
+    "BSL-1.0",
+    "ISC",
+    "MPL-2.0",
+    "Unicode-3.0",
+    "Zlib",
+]
+
+[licenses.private]
+ignore = true
+
+[bans]
+multiple-versions = "warn"
+wildcards = "deny"
+allow-wildcard-paths = true
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
