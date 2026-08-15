@@ -11,3 +11,5 @@ pub mod device;
 pub mod geometry;
 pub mod input;
 pub mod layout;
+pub mod rules;
+pub mod switcher;
