@@ -7,6 +7,7 @@
 
 #![forbid(unsafe_code)]
 
+pub mod clipboard;
 pub mod device;
 pub mod geometry;
 pub mod input;
