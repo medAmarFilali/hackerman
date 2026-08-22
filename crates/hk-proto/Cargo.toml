@@ -1,0 +1,17 @@
+[package]
+name = "hk-proto"
+description = "Wire messages exchanged between Hackerman peers"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+hk-core.workspace = true
+postcard.workspace = true
+serde.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+keyboard-types.workspace = true

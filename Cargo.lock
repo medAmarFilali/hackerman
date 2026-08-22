@@ -181,6 +181,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "hk-proto"
+version = "0.8.0"
+dependencies = [
+ "hk-core",
+ "keyboard-types",
+ "postcard",
+ "serde",
+ "thiserror",
+]
+
+[[package]]
 name = "indexmap"
 version = "2.14.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
