@@ -1,0 +1,23 @@
+[package]
+name = "hk-net"
+description = "Encrypted peer-to-peer links between Hackerman devices"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+hk-core.workspace = true
+hk-proto.workspace = true
+if-addrs.workspace = true
+mdns-sd.workspace = true
+spake2.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+quinn.workspace = true
+rcgen.workspace = true
+ring.workspace = true
+rustls.workspace = true
+thiserror.workspace = true
+
