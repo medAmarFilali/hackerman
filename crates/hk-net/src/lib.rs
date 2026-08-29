@@ -7,11 +7,13 @@
 
 #![forbid(unsafe_code)]
 
+mod discovery;
 mod identity;
 mod link;
 mod pairing;
 mod tls;
 
+pub use discovery::{Discovery, DiscoveryEvent, FoundDevice, local_addresses};
 pub use hk_core::device::Fingerprint;
 pub use identity::{Identity, fingerprint_of};
 pub use link::{
