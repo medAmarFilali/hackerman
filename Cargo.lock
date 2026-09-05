@@ -550,6 +550,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "hk-ipc"
+version = "0.8.0"
+dependencies = [
+ "hk-core",
+ "serde",
+ "serde_json",
+ "tokio",
+ "windows",
+]
+
+[[package]]
 name = "hk-net"
 version = "0.8.0"
 dependencies = [
