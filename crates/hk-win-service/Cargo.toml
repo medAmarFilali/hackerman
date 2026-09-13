@@ -1,0 +1,21 @@
+[package]
+name = "hk-win-service"
+description = "The Windows service that lets Hackerman work at the lock screen"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[target.'cfg(windows)'.dependencies]
+anyhow.workspace = true
+hk-core.workspace = true
+hk-daemon.workspace = true
+hk-platform.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+windows.workspace = true
+windows-core.workspace = true
+windows-service.workspace = true
