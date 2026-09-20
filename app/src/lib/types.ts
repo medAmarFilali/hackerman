@@ -1,0 +1,161 @@
+// The agent's messages, matching crates/hk-ipc/src/lib.rs.
+
+export type Fingerprint = string;
+
+export interface Placement {
+  device: Fingerprint;
+  monitor: string;
+  x: number;
+  y: number;
+  /** A width chosen by the user. Without one, the size comes from the screen. */
+  width?: number | null;
+}
+
+export type Request =
+  | { type: "pair"; device: Fingerprint }
+  | { type: "pairAddress"; address: string }
+  | { type: "submitPairingCode"; code: string }
+  | { type: "dismissPairing" }
+  | { type: "forget"; device: Fingerprint }
+  | { type: "setPlacements"; placements: Placement[] }
+  | { type: "rename"; name: string }
+  | { type: "setRules"; rules: Rules }
+  | { type: "setLocked"; locked: boolean }
+  | { type: "setEnabled"; enabled: boolean }
+  | { type: "sendFiles"; device: Fingerprint; paths: string[] }
+  | { type: "cancelTransfer"; id: string }
+  | { type: "dismissTransfer"; id: string }
+  | { type: "answerIncomingFiles"; id: string; accept: boolean; always?: boolean }
+  | { type: "setFilesAllowed"; device: Fingerprint; allowed: boolean }
+  | { type: "shutdown" };
+
+export type CrossModifier = "none" | "ctrl" | "shift" | "alt";
+export type ReceiveFiles = "askFirst" | "anyDevice" | "ask" | "never";
+export type NameClash = "keepBoth" | "replace" | "skip";
+
+export interface Rules {
+  clipboard: boolean;
+  shortcuts: boolean;
+  stayInFullscreen: boolean;
+  edgeDelayMs: number;
+  crossModifier: CrossModifier;
+  cornerGuard: number;
+  receiveFiles: ReceiveFiles;
+  /** Where files from other PCs go. Without one, the Desktop. */
+  dropFolder?: string | null;
+  nameClash: NameClash;
+  notifyFiles: boolean;
+}
+
+/** Whether this PC is set up to work at the lock screen. */
+export interface LockScreenStatus {
+  available: boolean;
+  on: boolean;
+  running: boolean;
+  upToDate: boolean;
+  /** Paired PCs that can't reach the lock screen until they're allowed. */
+  notAllowedYet: string[];
+}
+
+export type TransferStage =
+  | { stage: "waiting" }
+  | { stage: "running" }
+  | { stage: "done" }
+  | { stage: "failed"; reason: string }
+  | { stage: "cancelled" };
+
+export interface TransferView {
+  id: string;
+  /** The other PC. It's this PC for files saved here from here. */
+  peer: Fingerprint;
+  sending: boolean;
+  label: string;
+  totalBytes: number;
+  doneBytes: number;
+  stage: TransferStage;
+  folder: string | null;
+}
+
+export interface IncomingFilesView {
+  id: string;
+  peerName: string;
+  label: string;
+  totalBytes: number;
+}
+
+export interface ThisDevice {
+  fingerprint: Fingerprint;
+  name: string;
+  version: string;
+  model: string | null;
+  addresses: string[];
+  port: number;
+}
+
+export type DeviceStatus = "connected" | "off" | "offline" | "incompatible" | "available";
+
+export interface DeviceView {
+  fingerprint: Fingerprint;
+  name: string;
+  status: DeviceStatus;
+  model: string | null;
+  addresses: string[];
+  needsUpdateForFiles: boolean;
+  canReceiveFiles: boolean;
+  /** It can send files here without asking. */
+  filesAllowed: boolean;
+}
+
+export interface ScreenView {
+  device: Fingerprint;
+  monitor: string;
+  name: string;
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+  customWidth: number | null;
+  pixelWidth: number;
+  pixelHeight: number;
+  scale: number;
+  primary: boolean;
+  online: boolean;
+}
+
+export type PairingStage =
+  | { stage: "connecting" }
+  | { stage: "enterCode" }
+  | { stage: "showCode"; code: string }
+  | { stage: "verifying" }
+  | { stage: "paired" }
+  | { stage: "failed"; reason: string };
+
+export interface PairingView {
+  peerName: string | null;
+  stage: PairingStage;
+}
+
+export type ControlView =
+  | { state: "home" }
+  | { state: "controlling"; device: Fingerprint }
+  | { state: "controlledBy"; device: Fingerprint };
+
+export interface UiState {
+  me: ThisDevice;
+  devices: DeviceView[];
+  screens: ScreenView[];
+  pairing: PairingView | null;
+  control: ControlView;
+  rules: Rules;
+  enabled: boolean;
+  locked: boolean;
+  heldByFullscreen: boolean;
+  captureError: string | null;
+  desktopFolder: string | null;
+  transfers: TransferView[];
+  incomingFiles: IncomingFilesView | null;
+  /** Whether a layout is saved for exactly the screens there are now. */
+  layoutSaved: boolean;
+  /** How many sets of screens have a layout saved. */
+  savedLayouts: number;
+}
