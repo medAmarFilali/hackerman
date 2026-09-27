@@ -1,0 +1,39 @@
+[package]
+name = "hackerman-app"
+description = "Share one keyboard and mouse across several computers"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[lib]
+name = "hackerman_app"
+path = "src/lib.rs"
+
+[[bin]]
+name = "hackerman"
+path = "src/main.rs"
+
+[build-dependencies]
+tauri-build = { version = "2.7.4", features = [] }
+
+[dependencies]
+hk-daemon.workspace = true
+hk-ipc.workspace = true
+hk-platform.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tauri = { version = "2.12.5", features = ["tray-icon"] }
+tauri-plugin-autostart = "2"
+tauri-plugin-dialog = "2"
+tauri-plugin-single-instance = "2.5.5"
+tokio.workspace = true
+tracing.workspace = true
+
+[target."cfg(windows)".dependencies]
+hk-win-service.workspace = true
+tauri-winrt-notification = "0.8"
+
+[dev-dependencies]
+hk-core.workspace = true
