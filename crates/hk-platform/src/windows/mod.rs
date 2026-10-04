@@ -12,14 +12,21 @@ mod virtual_files;
 
 pub use virtual_files::data_object;
 
+use std::cell::Cell;
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use hk_core::clipboard::{ClipboardData, SharedFile};
 use hk_core::geometry::Point;
 use hk_core::input::InputEvent;
 use hk_core::layout::Monitor;
 use windows::Win32::System::Com::CoTaskMemFree;
+use windows::Win32::System::Threading::{
+    GetCurrentProcess, PROCESS_POWER_THROTTLING_CURRENT_VERSION,
+    PROCESS_POWER_THROTTLING_EXECUTION_SPEED, PROCESS_POWER_THROTTLING_STATE,
+    ProcessPowerThrottling, SetProcessInformation,
+};
 use windows::Win32::UI::HiDpi::{
     DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2, SetProcessDpiAwarenessContext,
 };
@@ -39,9 +46,34 @@ use crate::{Capture, Error, FileSource, InputHandler, Platform};
 /// report. Reports never get close to this at normal polling rates.
 const PARK_INSET: i32 = 300;
 
+/// Says yes at most once in a given time, for reporting something that could otherwise fill
+/// the log many times a second.
+struct Occasionally {
+    every: Duration,
+    last: Cell<Option<Instant>>,
+}
+
+impl Occasionally {
+    const fn every(every: Duration) -> Self {
+        Self {
+            every,
+            last: Cell::new(None),
+        }
+    }
+
+    fn due(&self) -> bool {
+        let due = self.last.get().is_none_or(|at| at.elapsed() >= self.every);
+        if due {
+            self.last.set(Some(Instant::now()));
+        }
+        due
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct NativePlatform {
     role: Role,
+    replayer: inject::Replayer,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -68,7 +100,35 @@ fn starting_up(role: Role) -> NativePlatform {
     // Without this, Windows reports scaled coordinates on high-DPI monitors.
     // It fails harmlessly if the awareness was already set.
     let _ = unsafe { SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2) };
-    NativePlatform { role }
+    keep_running_at_full_speed();
+    let may_send = match role {
+        Role::Agent => || true,
+        Role::Helper { .. } => session::follow_input_desktop,
+    };
+    NativePlatform {
+        role,
+        replayer: inject::Replayer::start(may_send),
+    }
+}
+
+/// Windows can run a program with no window in front on its slowest processors, at their
+/// slowest, to save power. Every key press and mouse movement on the computer waits on this one.
+fn keep_running_at_full_speed() {
+    let state = PROCESS_POWER_THROTTLING_STATE {
+        Version: PROCESS_POWER_THROTTLING_CURRENT_VERSION,
+        ControlMask: PROCESS_POWER_THROTTLING_EXECUTION_SPEED,
+        StateMask: 0,
+    };
+    // SAFETY: the size given is that of the structure. Windows ignores this if it's too old
+    // to know about it, and everything still works.
+    let _ = unsafe {
+        SetProcessInformation(
+            GetCurrentProcess(),
+            ProcessPowerThrottling,
+            (&raw const state).cast(),
+            size_of::<PROCESS_POWER_THROTTLING_STATE>() as u32,
+        )
+    };
 }
 
 fn move_cursor(to: Point) {
@@ -96,12 +156,14 @@ impl Platform for NativePlatform {
     }
 
     fn park_point(&self) -> Point {
-        // Near the corner of the primary monitor, which always starts at (0, 0).
+        // Near the top left of the primary monitor, which always starts at (0, 0). Windows'
+        // notifications come up at the bottom right, and one that came up under the parked
+        // cursor would show the cursor, and stay for as long as it was over it.
         let (width, height) =
             unsafe { (GetSystemMetrics(SM_CXSCREEN), GetSystemMetrics(SM_CYSCREEN)) };
         Point::new(
-            f64::from((width - PARK_INSET).max(width / 2)),
-            f64::from((height - PARK_INSET).max(height / 2)),
+            f64::from(PARK_INSET.min(width / 2)),
+            f64::from(PARK_INSET.min(height / 2)),
         )
     }
 
@@ -130,10 +192,11 @@ impl Platform for NativePlatform {
     }
 
     fn inject(&self, event: &InputEvent) {
-        if matches!(self.role, Role::Helper { .. }) && !session::follow_input_desktop() {
-            return;
-        }
-        inject::inject(event);
+        self.replayer.replay(*event);
+    }
+
+    fn finish_injecting(&self) {
+        self.replayer.finish();
     }
 
     fn start_capture(&self, handler: InputHandler) -> Result<Capture, Error> {

@@ -3,9 +3,20 @@
 //!
 //! Windows blocks input sent to windows of elevated (administrator) programs
 //! unless the sender is elevated too.
+//!
+//! `SendInput` waits for every program with a low-level input hook on the computer, and any
+//! of them can be slow. So it gets a thread of its own: however long it takes, the connection
+//! that the input came in on keeps going, which it needs to do to stay up. And when it does
+//! catch up, the cursor goes to where it should be by then, not through everywhere it has been.
+
+use std::sync::mpsc::{self, Receiver, Sender};
+use std::time::{Duration, Instant};
 
 use hk_core::geometry::Rect;
 use hk_core::input::{InputEvent, MouseButton};
+use windows::Win32::System::Threading::{
+    GetCurrentThread, SetThreadPriority, THREAD_PRIORITY_HIGHEST,
+};
 use windows::Win32::UI::Input::KeyboardAndMouse::{
     INPUT, INPUT_0, INPUT_KEYBOARD, INPUT_MOUSE, KEYBD_EVENT_FLAGS, KEYBDINPUT,
     KEYEVENTF_EXTENDEDKEY, KEYEVENTF_KEYUP, KEYEVENTF_SCANCODE, MOUSE_EVENT_FLAGS,
@@ -19,7 +30,97 @@ use windows::Win32::UI::WindowsAndMessaging::{
     XBUTTON1, XBUTTON2,
 };
 
-use super::keymap;
+use super::{Occasionally, keymap};
+
+/// `SendInput` taking this long means something on this computer is holding input up.
+const SLOW_TO_INJECT: Duration = Duration::from_millis(100);
+/// How long to wait for the last of the input when stopping.
+const FINISH_TIMEOUT: Duration = Duration::from_secs(1);
+
+thread_local! {
+    static SLOW_REPORT: Occasionally = const { Occasionally::every(Duration::from_secs(10)) };
+    static REFUSED_REPORT: Occasionally = const { Occasionally::every(Duration::from_secs(10)) };
+}
+
+enum Job {
+    Replay(InputEvent),
+    /// Says when everything before this has been replayed.
+    Finished(Sender<()>),
+}
+
+/// Hands input to the thread that replays it.
+#[derive(Debug, Clone)]
+pub(super) struct Replayer {
+    jobs: Sender<Job>,
+}
+
+impl Replayer {
+    /// `may_send` is asked before each event. The thread stops with the last of these.
+    pub(super) fn start(may_send: fn() -> bool) -> Self {
+        let (jobs, queue) = mpsc::channel();
+        let started = std::thread::Builder::new()
+            .name("input-replay".into())
+            .spawn(move || {
+                // SAFETY: this only concerns this thread, and a failure just leaves it as it is.
+                let _ = unsafe { SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_HIGHEST) };
+                run(&queue, |event| {
+                    if may_send() {
+                        inject(event);
+                    }
+                });
+            });
+        if let Err(error) = started {
+            tracing::error!(%error, "can't start the thread that replays input");
+        }
+        Self { jobs }
+    }
+
+    pub(super) fn replay(&self, event: InputEvent) {
+        let _ = self.jobs.send(Job::Replay(event));
+    }
+
+    pub(super) fn finish(&self) {
+        let (done, finished) = mpsc::channel();
+        if self.jobs.send(Job::Finished(done)).is_ok() {
+            let _ = finished.recv_timeout(FINISH_TIMEOUT);
+        }
+    }
+}
+
+/// Goes through the jobs until nobody can send any more. A position is skipped if the next
+/// thing to do is another position. Anything else keeps its place: a click has to land where
+/// the cursor was when it was made.
+fn run(queue: &Receiver<Job>, mut replay: impl FnMut(&InputEvent)) {
+    let is_position = |event: &InputEvent| matches!(event, InputEvent::PointerPosition { .. });
+    let mut next = None;
+    loop {
+        let job = match next.take() {
+            Some(job) => job,
+            None => match queue.recv() {
+                Ok(job) => job,
+                Err(_) => return,
+            },
+        };
+        match job {
+            Job::Finished(done) => {
+                let _ = done.send(());
+            }
+            Job::Replay(event) => {
+                if is_position(&event) {
+                    match queue.try_recv() {
+                        Ok(Job::Replay(newer)) if is_position(&newer) => {
+                            next = Some(Job::Replay(newer));
+                            continue;
+                        }
+                        Ok(other) => next = Some(other),
+                        Err(_) => {}
+                    }
+                }
+                replay(&event);
+            }
+        }
+    }
+}
 
 pub(super) fn inject(event: &InputEvent) {
     let mut inputs = Vec::with_capacity(2);
@@ -86,11 +187,21 @@ pub(super) fn inject(event: &InputEvent) {
         }
     }
 
+    let started = Instant::now();
     let sent = unsafe { SendInput(&inputs, size_of::<INPUT>() as i32) };
-    if sent as usize != inputs.len() {
-        tracing::debug!(
+    let took = started.elapsed();
+    if sent as usize != inputs.len() && REFUSED_REPORT.with(Occasionally::due) {
+        tracing::warn!(
             error = %windows::core::Error::from_thread(),
-            "Windows rejected injected input"
+            "Windows refused input from another PC. It does that while an administrator's \
+             program is in front, and on some protected screens"
+        );
+    }
+    if took >= SLOW_TO_INJECT && SLOW_REPORT.with(Occasionally::due) {
+        tracing::warn!(
+            ms = took.as_millis() as u64,
+            "Windows took a long time to accept input from another PC. Another program \
+             watching the keyboard and mouse may be holding it up"
         );
     }
 }
@@ -165,6 +276,72 @@ fn mouse(dx: i32, dy: i32, flags: MOUSE_EVENT_FLAGS, data: u32) -> INPUT {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    const fn position(x: f64) -> InputEvent {
+        InputEvent::PointerPosition { x, y: 0.0 }
+    }
+
+    const CLICK: InputEvent = InputEvent::Button {
+        button: MouseButton::Left,
+        pressed: true,
+    };
+
+    /// All of these queued up at once, as they would behind a slow `SendInput`.
+    fn replayed(events: &[InputEvent]) -> Vec<InputEvent> {
+        let (jobs, queue) = mpsc::channel();
+        for &event in events {
+            jobs.send(Job::Replay(event)).unwrap();
+        }
+        drop(jobs);
+        let mut seen = Vec::new();
+        run(&queue, |event| seen.push(*event));
+        seen
+    }
+
+    #[test]
+    fn only_the_newest_of_several_positions_in_a_row_matters() {
+        assert_eq!(
+            replayed(&[position(1.0), position(2.0), position(3.0)]),
+            [position(3.0)]
+        );
+    }
+
+    #[test]
+    fn a_click_lands_where_the_cursor_was_when_it_was_made() {
+        assert_eq!(
+            replayed(&[
+                position(1.0),
+                position(2.0),
+                CLICK,
+                position(3.0),
+                position(4.0)
+            ]),
+            [position(2.0), CLICK, position(4.0)]
+        );
+    }
+
+    #[test]
+    fn nothing_but_positions_is_ever_skipped() {
+        let key = InputEvent::Key {
+            code: hk_core::input::KeyCode::KeyA,
+            pressed: true,
+        };
+        let all = [key, CLICK, key, CLICK];
+        assert_eq!(replayed(&all), all);
+    }
+
+    #[test]
+    fn finishing_waits_for_what_came_before_it() {
+        let (jobs, queue) = mpsc::channel();
+        let (done, finished) = mpsc::channel();
+        jobs.send(Job::Replay(CLICK)).unwrap();
+        jobs.send(Job::Finished(done)).unwrap();
+        drop(jobs);
+        let mut seen = Vec::new();
+        run(&queue, |event| seen.push(*event));
+        assert_eq!(seen, [CLICK]);
+        assert_eq!(finished.try_recv(), Ok(()));
+    }
 
     #[test]
     fn normalized_positions_cover_the_whole_range() {

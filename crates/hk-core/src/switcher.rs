@@ -24,6 +24,10 @@ use crate::input::{InputEvent, KeyCode, MouseButton};
 use crate::layout::{Crossing, Side, Topology, clamp_to_pixels};
 use crate::rules::{CrossModifier, Rules};
 
+/// How far from where it was parked the cursor has to be for something to have moved it.
+/// Nearer than this can be a single report from the mouse.
+const PARKED_CURSOR_MOVED: f64 = 150.0;
+
 /// Input from this machine's own keyboard and mouse.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum LocalEvent {
@@ -451,12 +455,28 @@ impl Switcher {
 
     fn handle_remote(&mut self, remote: Remote, event: LocalEvent) -> Outcome {
         match event {
-            LocalEvent::Motion { to: position, .. } => {
+            LocalEvent::Motion { from, to: position } => {
                 // The local cursor stays parked, so every move is an offset from the park point.
                 let dx = position.x - self.park.x;
                 let dy = position.y - self.park.y;
                 if dx == 0.0 && dy == 0.0 {
                     return Outcome::swallow(vec![]);
+                }
+                // Unless something else has moved it, or Windows dropped the input hook for a
+                // while and the mouse did. Measuring from the park point would then send the
+                // other cursor flying with every report, so it goes back, and the move counts
+                // from where it really started.
+                let away = (from.x - self.park.x)
+                    .abs()
+                    .max((from.y - self.park.y).abs());
+                if away > PARKED_CURSOR_MOVED {
+                    let moved = Point::new(
+                        remote.cursor.x + position.x - from.x,
+                        remote.cursor.y + position.y - from.y,
+                    );
+                    let mut actions = vec![Action::ParkCursor(self.park)];
+                    actions.extend(self.move_remote_cursor(remote, moved));
+                    return Outcome::swallow(actions);
                 }
                 let moved = Point::new(remote.cursor.x + dx, remote.cursor.y + dy);
                 Outcome::swallow(self.move_remote_cursor(remote, moved))
@@ -764,7 +784,7 @@ mod tests {
 
     /// Moves the parked cursor by (dx, dy) while controlling another device.
     fn nudge(dx: f64, dy: f64) -> LocalEvent {
-        motion(PARK.x + dx, PARK.y + dy)
+        moving(PARK.x, PARK.y, PARK.x + dx, PARK.y + dy)
     }
 
     fn key(code: KeyCode, pressed: bool) -> LocalEvent {
@@ -773,6 +793,37 @@ mod tests {
 
     fn at(device: Fingerprint, x: f64, y: f64) -> Action {
         position_event(device, Point::new(x, y))
+    }
+
+    /// What happens if Windows drops the input hook while the cursor is parked: the mouse
+    /// moves it away, and then the hook comes back.
+    #[test]
+    fn a_parked_cursor_that_got_moved_goes_back_without_throwing_the_other_cursor_off() {
+        let mut s = peer_on_the_right();
+        s.local(motion(1919.0, 540.0));
+        assert_eq!(s.controlling(), Some(PEER));
+
+        // Measured from where it was parked, this one report would be a leap of over 800 pixels.
+        let far_away = Point::new(PARK.x + 800.0, PARK.y + 400.0);
+        let outcome = s.local(LocalEvent::Motion {
+            from: far_away,
+            to: Point::new(far_away.x + 3.0, far_away.y - 2.0),
+        });
+        assert!(outcome.swallow);
+        assert_eq!(
+            outcome.actions,
+            [Action::ParkCursor(PARK), at(PEER, 3.0, 538.0)]
+        );
+
+        // And it carries on from the park point as usual.
+        assert_eq!(s.local(nudge(5.0, 5.0)).actions, [at(PEER, 8.0, 543.0)]);
+    }
+
+    #[test]
+    fn a_fast_move_of_a_parked_cursor_is_just_a_fast_move() {
+        let mut s = peer_on_the_right();
+        s.local(motion(1919.0, 540.0));
+        assert_eq!(s.local(nudge(120.0, 0.0)).actions, [at(PEER, 120.0, 540.0)]);
     }
 
     #[test]
@@ -1573,8 +1624,8 @@ mod tests {
         assert!(s.local(motion(1919.0, 500.0)).swallow);
         assert_eq!(s.controlling(), Some(PEER));
         // Up to the corner of the other device's screen, then left: it stays there.
-        s.local(motion(960.0, 0.0));
-        s.local(motion(959.0, 540.0));
+        s.local(nudge(0.0, -540.0));
+        s.local(nudge(-1.0, 0.0));
         assert_eq!(s.controlling(), Some(PEER));
     }
 

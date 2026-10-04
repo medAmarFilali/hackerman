@@ -147,6 +147,16 @@ usual.
 
 Use the left Alt key. AltGr stays free for typing characters such as @ and #.
 
+### If the keyboard and mouse freeze
+
+Clicking a Windows notification leaves the keyboard with nothing in front, until you click a
+window. That's Windows, and it happens without Hackerman too.
+
+The log says what it saw: whether input took a long time to reach Hackerman or to reach Windows,
+whether Windows removed Hackerman's input hooks (they're put back within seconds), and whether
+Windows refused input from another computer. Look in the log of the computer with the keyboard,
+and of the one the cursor was on.
+
 ### Known limits for now
 
 - Input can't reach administrator windows, the lock screen or the login screen.

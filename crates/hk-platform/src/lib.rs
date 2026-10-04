@@ -62,8 +62,13 @@ pub trait Platform: Clone + Send + Sync + 'static {
     /// Shows the cursor again, at this position.
     fn restore_cursor(&self, to: Point);
 
-    /// Replays input as if it came from this machine's own devices.
+    /// Replays input as if it came from this machine's own devices. This doesn't wait for
+    /// that to happen.
     fn inject(&self, event: &InputEvent);
+
+    /// Waits a moment for what's been given to [`Platform::inject`] to be replayed, so that
+    /// a program about to stop doesn't leave keys held down.
+    fn finish_injecting(&self) {}
 
     /// Starts capturing all keyboard and mouse input, until the returned value
     /// is dropped.

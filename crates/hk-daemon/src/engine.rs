@@ -76,6 +76,8 @@ const FINISHED_TRANSFERS_KEPT: usize = 20;
 /// A device running another version keeps being refused, so don't try often. An
 /// update on either side is still noticed quickly enough.
 const INCOMPATIBLE_DIALS_EVERY_N_TICKS: u64 = 15;
+/// A tick this late means the agent was held up, or the computer was asleep.
+const HELD_UP_AFTER: Duration = Duration::from_secs(5);
 
 pub struct Options {
     /// Where to keep settings, the identity and saved data.
@@ -288,6 +290,7 @@ struct Engine<P: Platform> {
     apps: Vec<UnboundedSender<UiState>>,
     last_state: Option<UiState>,
     ticks: u64,
+    last_tick: Instant,
     // These keep input capture and clipboard watching running.
     capture: Option<Capture>,
     _clipboard_watcher: Option<Capture>,
@@ -419,12 +422,18 @@ pub async fn run<P: Platform>(options: Options, platform: P) -> Result<()> {
         apps: Vec::new(),
         last_state: None,
         ticks: 0,
+        last_tick: Instant::now(),
         capture,
         _clipboard_watcher: clipboard_watcher,
     };
     engine.rebuild();
     engine.main_loop(events_rx).await;
     engine.shut_down(listeners).await;
+    // Sessions let go of any keys held down on this computer as they end, which they're just
+    // about to. Those have to reach Windows before this program stops.
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    let platform = engine.shared.platform.clone();
+    let _ = tokio::task::spawn_blocking(move || platform.finish_injecting()).await;
     tracing::info!("hackerman agent stopped");
     Ok(())
 }
@@ -606,6 +615,14 @@ impl<P: Platform> Engine<P> {
 
     fn on_tick(&mut self) {
         self.ticks += 1;
+        let since_last = self.last_tick.elapsed();
+        self.last_tick = Instant::now();
+        if since_last >= TICK + HELD_UP_AFTER {
+            tracing::info!(
+                seconds = since_last.as_secs(),
+                "the agent was held up, or this computer was asleep"
+            );
+        }
         let monitors = self.shared.platform.monitors();
         if monitors != self.monitors {
             tracing::info!(count = monitors.len(), "monitors changed");
