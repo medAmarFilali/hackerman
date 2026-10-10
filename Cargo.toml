@@ -20,6 +20,7 @@ hk-win-service = { path = "crates/hk-win-service" }
 
 anyhow = "1.0.104"
 arboard = "3.7.0"
+base64 = "0.22.1"
 if-addrs = "0.15.0"
 keyboard-types = "0.8.3"
 mdns-sd = "0.21.6"
@@ -41,8 +42,12 @@ tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
 windows-core = "0.62.2"
 windows-service = "0.8.1"
 windows = { version = "0.62.2", features = [
+    "Foundation",
+    "Foundation_Collections",
+    "Media_Control",
     "Win32_Devices_Display",
     "Win32_Foundation",
+    "Win32_Graphics_Dwm",
     "Win32_Graphics_Gdi",
     "Win32_Security",
     "Win32_System_Registry",

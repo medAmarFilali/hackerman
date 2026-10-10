@@ -145,6 +145,15 @@ async fn receive_loop<P: Platform>(
             Message::TransferCancel(id) => {
                 let _ = events.send(Event::TransferCancelled { peer, id });
             }
+            Message::Apps(apps) => {
+                let _ = events.send(Event::PeerApps { peer, apps });
+            }
+            Message::AppIcon { app, png } => {
+                let _ = events.send(Event::PeerAppIcon { peer, app, png });
+            }
+            Message::Media { app, command } => {
+                let _ = events.send(Event::MediaRequested { peer, app, command });
+            }
         }
     }
 }

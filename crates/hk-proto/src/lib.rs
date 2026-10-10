@@ -2,6 +2,7 @@
 
 #![forbid(unsafe_code)]
 
+use hk_core::apps::{MediaCommand, RunningApp};
 use hk_core::clipboard::{ClipVersion, ClipboardData, SharedFile};
 use hk_core::input::InputEvent;
 use hk_core::layout::{LayoutDoc, Monitor};
@@ -29,8 +30,14 @@ pub const FEATURE_FILES: u32 = 1 << 0;
 /// Can be sent files to save in a folder, and report how that goes.
 pub const FEATURE_SEND_FILES: u32 = 1 << 1;
 
+/// Wants to hear which apps are open on the sender, and can say the same of itself.
+pub const FEATURE_APPS: u32 = 1 << 2;
+
+/// Can be asked to play, pause and skip what's playing there.
+pub const FEATURE_MEDIA: u32 = 1 << 3;
+
 /// Everything this version can do beyond the base protocol, for [`Message::Hello`].
-pub const FEATURES: u32 = FEATURE_FILES | FEATURE_SEND_FILES;
+pub const FEATURES: u32 = FEATURE_FILES | FEATURE_SEND_FILES | FEATURE_APPS | FEATURE_MEDIA;
 
 /// A message sent from one peer to another.
 ///
@@ -77,6 +84,14 @@ pub enum Message {
     /// The sender of those files no longer wants them saved. Needs
     /// [`FEATURE_SEND_FILES`].
     TransferCancel(ClipVersion),
+    /// Which apps are open on the sender now, frontmost first. Needs [`FEATURE_APPS`].
+    Apps(Vec<RunningApp>),
+    /// A picture of one of those apps, as a PNG. These go separately and only once each, so
+    /// that a window moving to another screen doesn't send them all again. Needs
+    /// [`FEATURE_APPS`].
+    AppIcon { app: String, png: Vec<u8> },
+    /// Asks the receiver to do this with an app. Needs [`FEATURE_MEDIA`].
+    Media { app: String, command: MediaCommand },
 }
 
 /// See [`Message::Transfer`].
@@ -260,6 +275,45 @@ mod tests {
         };
         let bytes = encode_clipboard(&blob).unwrap();
         assert_eq!(decode_clipboard(&bytes).unwrap(), blob);
+    }
+
+    #[test]
+    fn apps_and_what_to_do_with_them_round_trip() {
+        use hk_core::apps::MediaState;
+
+        for message in [
+            Message::Apps(vec![RunningApp {
+                id: "spotify".into(),
+                name: "Spotify".into(),
+                monitors: vec![r"\\?\DISPLAY#BOE0B04#4&1f668989&0&UID8388688".into()],
+                minimized: true,
+                media: Some(MediaState {
+                    playing: Some(true),
+                    can_go_back: false,
+                    can_go_forward: true,
+                }),
+            }]),
+            Message::AppIcon {
+                app: "spotify".into(),
+                png: vec![0x89, b'P', b'N', b'G'],
+            },
+            Message::Media {
+                app: "stremio".into(),
+                command: MediaCommand::Forward,
+            },
+        ] {
+            assert_eq!(decode(&encode(&message).unwrap()).unwrap(), message);
+        }
+    }
+
+    /// Other versions go by these numbers, so they can't change.
+    #[test]
+    fn what_each_feature_bit_means_stays_put() {
+        assert_eq!(FEATURE_SEND_FILES, 2);
+        assert_eq!(FEATURE_APPS, 4);
+        assert_eq!(FEATURE_MEDIA, 8);
+        assert_eq!(FEATURES & FEATURE_APPS, FEATURE_APPS);
+        assert_eq!(FEATURES & FEATURE_MEDIA, FEATURE_MEDIA);
     }
 
     #[test]

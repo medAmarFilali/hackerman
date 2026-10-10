@@ -27,7 +27,10 @@ export type Request =
   | { type: "dismissTransfer"; id: string }
   | { type: "answerIncomingFiles"; id: string; accept: boolean; always?: boolean }
   | { type: "setFilesAllowed"; device: Fingerprint; allowed: boolean }
+  | { type: "mediaCommand"; device: Fingerprint; app: string; command: MediaCommand }
   | { type: "shutdown" };
+
+export type MediaCommand = "playPause" | "back" | "forward";
 
 export type CrossModifier = "none" | "ctrl" | "shift" | "alt";
 export type ReceiveFiles = "askFirst" | "anyDevice" | "ask" | "never";
@@ -45,6 +48,10 @@ export interface Rules {
   dropFolder?: string | null;
   nameClash: NameClash;
   notifyFiles: boolean;
+  /** Tell other PCs the names of the apps open here. */
+  shareApps: boolean;
+  /** Let other PCs play, pause and skip what's playing here. */
+  mediaControl: boolean;
 }
 
 /** Whether this PC is set up to work at the lock screen. */
@@ -120,6 +127,25 @@ export interface ScreenView {
   scale: number;
   primary: boolean;
   online: boolean;
+  /** What's open on this screen, frontmost first. */
+  apps: AppView[];
+}
+
+export interface MediaState {
+  /** Whether it's playing right now. Some apps don't say. */
+  playing: boolean | null;
+  canGoBack: boolean;
+  canGoForward: boolean;
+}
+
+export interface AppView {
+  id: string;
+  name: string;
+  /** A picture of it, ready to show. Some apps have none to be found. */
+  icon: string | null;
+  minimized: boolean;
+  /** Set if it can be played and paused from here. */
+  media: MediaState | null;
 }
 
 export type PairingStage =

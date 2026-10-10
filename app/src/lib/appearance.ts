@@ -6,6 +6,10 @@ export interface Appearance {
   laptopKeyboards: boolean;
   /** What's drawn under a monitor. */
   monitorStands: boolean;
+  /** The apps open on each screen. */
+  appsOnScreens: boolean;
+  /** Back, pause and forward, on the screens with something to play. */
+  mediaButtons: boolean;
 }
 
 const STORAGE_KEY = "hackerman-appearance";
@@ -20,6 +24,8 @@ function saved(): Appearance {
   return {
     laptopKeyboards: stored?.laptopKeyboards !== false,
     monitorStands: stored?.monitorStands !== false,
+    appsOnScreens: stored?.appsOnScreens !== false,
+    mediaButtons: stored?.mediaButtons !== false,
   };
 }
 

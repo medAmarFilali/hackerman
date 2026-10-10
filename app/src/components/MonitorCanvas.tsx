@@ -6,8 +6,12 @@ import {
   Download,
   FileUp,
   Move,
+  Pause,
+  Play,
   Plus,
   Scaling,
+  SkipBack,
+  SkipForward,
   Star,
 } from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
@@ -32,7 +36,14 @@ import {
 import { useAppearance } from "@/lib/appearance";
 import { activeDevice, cantReceiveFilesBecause, deviceNumbers, isBuiltIn } from "@/lib/devices";
 import { useFileDrag } from "@/lib/file-drag";
-import type { DeviceView, Fingerprint, ScreenView, UiState } from "@/lib/types";
+import type {
+  AppView,
+  DeviceView,
+  Fingerprint,
+  MediaCommand,
+  ScreenView,
+  UiState,
+} from "@/lib/types";
 import { cn } from "@/lib/utils";
 import { send } from "@/store";
 
@@ -48,6 +59,17 @@ const THINNEST_BAND = 8;
 const MOVES = "transition-[left,top,width,height] duration-200 ease-out motion-reduce:transition-none";
 /** How long to say that the screens have changed. */
 const SCREENS_CHANGED_FOR_MS = 10_000;
+/** What a tile's name and details at the top and bottom leave of its height, in pixels. */
+const TILE_TEXT_HEIGHT = 92;
+const APP_ICON_WIDTH = 24;
+const APP_ROW_HEIGHT = 24;
+const PLAYER_ROW_HEIGHT = 30;
+/** The padding of a tile, on both sides together, with a little to spare. */
+const TILE_PADDING = 24;
+/** Narrower than this, a player has room for its buttons but not its name. */
+const PLAYER_NAME_NEEDS_WIDTH = 170;
+/** An app's icon and three buttons, with their gaps and the border around them. */
+const PLAYER_WIDTH_WITHOUT_NAME = 104;
 
 function keyOf(screen: { device: Fingerprint; monitor: string }): string {
   return `${screen.device}/${screen.monitor}`;
@@ -310,6 +332,7 @@ export function MonitorCanvas({ state }: { state: UiState }) {
     }
   }
 
+
   const connected = state.devices.filter((device) => device.status === "connected");
   const unreachable = state.enabled
     ? connected.filter(
@@ -467,9 +490,12 @@ export function MonitorCanvas({ state }: { state: UiState }) {
           screens until they line up with another PC's and a violet band appears.
         </p>
       )}
+
+
     </div>
   );
 }
+
 
 /** Says whether this arrangement will come back if the screens change and change back. */
 function LayoutStatus({ state }: { state: UiState }) {
@@ -606,7 +632,7 @@ function MonitorTile({
 }: MonitorTileProps) {
   const active = presence === "active";
   const away = presence === "away";
-  const label = `${screen.name}, ${deviceName}${model ? `, ${model}` : ""}, PC number ${number}, ${screen.pixelWidth} by ${screen.pixelHeight}${active ? ", has the keyboard and mouse" : ""}${away ? `, ${awayReason}` : ""}. Use the arrow keys to move it, and plus and minus to resize it.`;
+  const label = `${screen.name}, ${deviceName}${model ? `, ${model}` : ""}, PC number ${number}, ${screen.pixelWidth} by ${screen.pixelHeight}${active ? ", has the keyboard and mouse" : ""}${away ? `, ${awayReason}` : ""}. Use the arrow keys to move it, plus and minus to resize it, and Enter to see what's on it.`;
   return (
     <div
       role="button"
@@ -648,6 +674,11 @@ function MonitorTile({
               )}
             </div>
           </div>
+          <AppsOnScreen
+            screen={screen}
+            view={view}
+            deviceName={deviceName}
+          />
           <div className="eyebrow hidden min-w-0 pe-3 @[6rem]:block">
             <div className="flex min-w-0 items-center gap-1">
               {screen.primary && (
@@ -682,6 +713,184 @@ function MonitorTile({
           className="absolute right-[0.3125rem] bottom-[0.3125rem] size-[0.4375rem] rounded-br-[2px] border-r border-b border-(--frame) group-hover/handle:border-foreground"
         />
       </div>
+    </div>
+  );
+}
+
+/** What's open on a screen, with buttons for anything that can be played. */
+function AppsOnScreen({
+  screen,
+  view,
+  deviceName,
+}: {
+  screen: ScreenView;
+  view: View;
+  deviceName: string;
+}) {
+  const { appsOnScreens, mediaButtons } = useAppearance();
+  const width = screen.width * view.scale;
+  const room = screen.height * view.scale - TILE_TEXT_HEIGHT;
+  const players = mediaButtons ? screen.apps.filter((app) => app.media) : [];
+  const others = appsOnScreens ? screen.apps.filter((app) => !players.includes(app)) : [];
+  // The buttons come first. The apps get a row of their own if there's one left, and otherwise
+  // whatever's left beside the last of the buttons.
+  const shownPlayers = players.slice(0, Math.max(0, Math.floor(room / PLAYER_ROW_HEIGHT)));
+  const rowLeft = room - shownPlayers.length * PLAYER_ROW_HEIGHT >= APP_ROW_HEIGHT;
+  const besidePlayer = !rowLeft && shownPlayers.length > 0 && others.length > 0;
+  const inner = width - TILE_PADDING;
+  const showNames = inner >= PLAYER_NAME_NEEDS_WIDTH;
+  const lastIndex = shownPlayers.length - 1;
+  if (shownPlayers.length === 0 && (others.length === 0 || !rowLeft)) return null;
+
+  return (
+    <div className="flex min-h-0 flex-1 flex-col justify-center gap-1 overflow-hidden">
+      {shownPlayers.map((app, index) => {
+        const player = (
+          <Player
+            key={app.id}
+            app={app}
+            screen={screen}
+            deviceName={deviceName}
+            showName={showNames && !(besidePlayer && index === lastIndex)}
+          />
+        );
+        return besidePlayer && index === lastIndex ? (
+          <div key={app.id} className="flex min-w-0 items-center gap-1.5">
+            {player}
+            <AppIcons apps={others} room={inner - PLAYER_WIDTH_WITHOUT_NAME} />
+          </div>
+        ) : (
+          player
+        );
+      })}
+      {rowLeft && others.length > 0 && (
+        <AppIcons apps={others} room={inner} />
+      )}
+    </div>
+  );
+}
+
+function AppIcons({
+  apps,
+  room,
+}: {
+  apps: AppView[];
+  room: number;
+}) {
+  const fit = Math.floor(room / APP_ICON_WIDTH);
+  if (fit < 1) return null;
+  const shown = apps.length > fit ? apps.slice(0, fit - 1) : apps;
+  const rest = apps.slice(shown.length);
+  return (
+    <ul aria-label="Open apps" className="flex min-w-0 items-center gap-1">
+      {shown.map((app) => (
+        <li key={app.id} title={app.minimized ? `${app.name} (minimized)` : app.name}>
+          <AppIcon app={app} />
+        </li>
+      ))}
+      {rest.length > 0 && (
+        <li
+          title={rest.map((app) => app.name).join(", ")}
+          className="eyebrow flex size-5 items-center justify-center tracking-normal tabular-nums"
+        >
+          +{rest.length}
+        </li>
+      )}
+    </ul>
+  );
+}
+
+function AppIcon({ app }: { app: AppView }) {
+  const dimmed = app.minimized && "opacity-45";
+  if (app.icon) {
+    return (
+      <img
+        src={app.icon}
+        alt={app.name}
+        draggable={false}
+        className={cn("size-5 shrink-0 rounded-[3px] object-contain", dimmed)}
+      />
+    );
+  }
+  return (
+    <span
+      role="img"
+      aria-label={app.name}
+      className={cn(
+        "flex size-5 shrink-0 items-center justify-center rounded-[3px] border bg-muted text-[0.625rem] font-medium uppercase",
+        dimmed,
+      )}
+    >
+      {app.name.charAt(0)}
+    </span>
+  );
+}
+
+function Player({
+  app,
+  screen,
+  deviceName,
+  showName,
+}: {
+  app: AppView;
+  screen: ScreenView;
+  deviceName: string;
+  showName: boolean;
+}) {
+  const media = app.media;
+  if (!media) return null;
+  const run = (command: MediaCommand) =>
+    send({ type: "mediaCommand", device: screen.device, app: app.id, command });
+  const where = `${app.name} on ${deviceName}`;
+  const playing = media.playing === true;
+  return (
+    // The buttons are for pressing, so nothing here starts moving the screen.
+    <div
+      data-player={app.id}
+      onPointerDown={(event) => event.stopPropagation()}
+      onKeyDown={(event) => event.stopPropagation()}
+      className="flex w-fit max-w-full min-w-0 cursor-default items-center gap-1 rounded-lg border bg-card py-0.5 ps-1 pe-0.5"
+    >
+      <span title={app.name} className="shrink-0">
+        <AppIcon app={app} />
+      </span>
+      {showName && (
+        <span title={app.name} className="min-w-0 truncate pe-0.5 text-[0.6875rem] font-medium">
+          {app.name}
+        </span>
+      )}
+      <Button
+        size="icon-xs"
+        variant="ghost"
+        className="size-5"
+        title="Back"
+        aria-label={`Back on ${where}`}
+        disabled={!media.canGoBack}
+        onClick={() => run("back")}
+      >
+        <SkipBack strokeWidth={1.5} />
+      </Button>
+      <Button
+        size="icon-xs"
+        variant="ghost"
+        className={cn("size-5", playing && "text-signal")}
+        title={media.playing === null ? "Play or pause" : playing ? "Pause" : "Play"}
+        aria-label={`${media.playing === null ? "Play or pause" : playing ? "Pause" : "Play"} ${where}`}
+        onClick={() => run("playPause")}
+      >
+        {playing ? <Pause strokeWidth={1.5} /> : <Play strokeWidth={1.5} />}
+      </Button>
+      <Button
+        size="icon-xs"
+        variant="ghost"
+        className="size-5"
+        title="Forward"
+        aria-label={`Forward on ${where}`}
+        disabled={!media.canGoForward}
+        onClick={() => run("forward")}
+      >
+        <SkipForward strokeWidth={1.5} />
+      </Button>
     </div>
   );
 }

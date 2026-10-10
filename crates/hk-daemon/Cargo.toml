@@ -16,6 +16,7 @@ path = "src/main.rs"
 
 [dependencies]
 anyhow.workspace = true
+base64.workspace = true
 hk-core.workspace = true
 hk-ipc.workspace = true
 hk-net.workspace = true

@@ -42,6 +42,15 @@ pub(super) fn enumerate() -> Vec<Monitor> {
         .collect()
 }
 
+/// Each monitor's identity, by the handle Windows gives it for now.
+pub(super) fn ids_by_handle() -> HashMap<isize, String> {
+    let names = display_names();
+    monitor_handles()
+        .into_iter()
+        .filter_map(|handle| Some((handle.0 as isize, describe(handle, &names)?.id)))
+        .collect()
+}
+
 fn monitor_handles() -> Vec<HMONITOR> {
     unsafe extern "system" fn collect(
         monitor: HMONITOR,

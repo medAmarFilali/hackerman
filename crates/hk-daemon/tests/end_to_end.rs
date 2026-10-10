@@ -8,6 +8,7 @@ use std::sync::OnceLock;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::{Duration, Instant};
 
+use hk_core::apps::{MediaCommand, MediaState, RunningApp};
 use hk_core::clipboard::{ClipVersion, ClipboardData, ClipboardImage, SharedFile};
 use hk_core::device::Fingerprint;
 use hk_core::geometry::{Point, Rect};
@@ -23,12 +24,14 @@ use hk_net::{Endpoint, Identity, TrustStore};
 use hk_platform::Platform;
 use hk_platform::fake::FakePlatform;
 use hk_proto::{
-    ClipboardBlob, FEATURE_FILES, FEATURES, FileAnswer, FileRequest, Message, PROTOCOL_VERSION,
-    TransferUpdate,
+    ClipboardBlob, FEATURE_FILES, FEATURE_SEND_FILES, FEATURES, FileAnswer, FileRequest, Message,
+    PROTOCOL_VERSION, TransferUpdate,
 };
 use tokio::task::JoinHandle;
 
 const TIMEOUT: Duration = Duration::from_secs(20);
+/// Long enough for an agent to look again at what's open.
+const TICK_AND_A_BIT: Duration = Duration::from_millis(2500);
 
 /// One running agent with a simulated computer, and an app connected to it.
 struct Device {
@@ -3470,4 +3473,530 @@ async fn the_cross_settings_apply_to_the_real_cursor() {
     assert!(!a.move_mouse(1919.0, 10.0), "too near the corner");
     assert!(a.move_mouse(1919.0, 500.0));
     wait_for_injected(&b, InputEvent::PointerPosition { x: 0.0, y: 500.0 }).await;
+}
+
+// What's open, and what's playing
+
+fn window_of(id: &str, name: &str, monitors: &[&str]) -> RunningApp {
+    RunningApp {
+        id: id.into(),
+        name: name.into(),
+        monitors: monitors.iter().map(ToString::to_string).collect(),
+        minimized: false,
+        media: None,
+    }
+}
+
+fn player(id: &str, playing: Option<bool>) -> RunningApp {
+    RunningApp {
+        media: Some(MediaState {
+            playing,
+            can_go_back: true,
+            can_go_forward: true,
+        }),
+        ..window_of(id, id, &["fake-0"])
+    }
+}
+
+/// What a device's screen shows of apps, from where this state was made.
+fn apps_on_screen<'a>(state: &'a UiState, device: Fingerprint, monitor: &str) -> Vec<&'a str> {
+    state
+        .screens
+        .iter()
+        .find(|screen| screen.device == device && screen.monitor == monitor)
+        .map(|screen| screen.apps.iter().map(|app| app.id.as_str()).collect())
+        .unwrap_or_default()
+}
+
+/// Whether a device's screen shows something playing, or that isn't, from this state.
+fn shows_playing(state: &UiState, device: Fingerprint, app: &str, playing: bool) -> bool {
+    state.screens.iter().any(|screen| {
+        screen.device == device
+            && screen.apps.iter().any(|shown| {
+                shown.id == app
+                    && shown
+                        .media
+                        .is_some_and(|media| media.playing == Some(playing))
+            })
+    })
+}
+
+/// Waits until this device has asked this app here to do this.
+async fn wait_for_media_command(device: &Device, app: &str, command: MediaCommand) {
+    let wanted = (app.to_string(), command);
+    let wait = async {
+        while !device.platform.media_commands().contains(&wanted) {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    };
+    tokio::time::timeout(TIMEOUT, wait)
+        .await
+        .unwrap_or_else(|_| {
+            panic!(
+                "{} never got {wanted:?}, only {:?}",
+                device.name,
+                device.platform.media_commands()
+            )
+        });
+}
+
+/// An agent paired with a device that isn't there, for a test to play the part of.
+async fn with_a_paired_device_to_play(name: &str) -> (Device, Identity, Fingerprint) {
+    let identity = Identity::generate().unwrap();
+    let id = unique_id();
+    let dir = fresh_dir(id);
+    std::fs::write(
+        dir.join("devices.json"),
+        format!(
+            r#"[{{"fingerprint":"{}","name":"{name}"}}]"#,
+            identity.fingerprint()
+        ),
+    )
+    .unwrap();
+    let a = Device::start_in(
+        "alpha",
+        dir,
+        channel_name(id),
+        FakePlatform::with_screens(1),
+    )
+    .await;
+    let a_id = a.fingerprint();
+    (a, identity, a_id)
+}
+
+fn hello_from(name: &str, features: u32, monitors: Vec<Monitor>) -> Message {
+    Message::Hello {
+        protocol_version: PROTOCOL_VERSION,
+        device_name: name.into(),
+        monitors,
+        layout: LayoutDoc::default(),
+        model: None,
+        enabled: true,
+        features,
+    }
+}
+
+/// The apps on each PC, on the drawing of each of its screens.
+#[tokio::test(flavor = "multi_thread")]
+async fn each_screen_shows_the_apps_open_on_it_wherever_it_is_seen_from() {
+    let monitors = vec![
+        monitor("left", 0.0, 0.0, 1920.0, 1080.0, 1.0),
+        monitor("right", 1920.0, 0.0, 1920.0, 1080.0, 1.0),
+    ];
+    let b_platform = FakePlatform::new(monitors);
+    b_platform.set_running_apps(vec![
+        window_of("code", "Visual Studio Code", &["left"]),
+        window_of("msedge", "Microsoft Edge", &["right", "left"]),
+    ]);
+    let mut a = Device::start("alpha").await;
+    let mut b = Device::start_with("bravo", b_platform).await;
+    let b_id = b.fingerprint();
+    pair(&mut a, &mut b).await;
+
+    a.wait_for("the other PC's apps", |s| {
+        apps_on_screen(s, b_id, "left") == ["code", "msedge"]
+            && apps_on_screen(s, b_id, "right") == ["msedge"]
+    })
+    .await;
+    b.wait_for("its own apps", |s| {
+        apps_on_screen(s, b_id, "left") == ["code", "msedge"]
+    })
+    .await;
+
+    // A window moves to the other screen, and another app closes.
+    b.platform
+        .set_running_apps(vec![window_of("code", "Visual Studio Code", &["right"])]);
+    a.wait_for("the change", |s| {
+        apps_on_screen(s, b_id, "left").is_empty() && apps_on_screen(s, b_id, "right") == ["code"]
+    })
+    .await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn something_playing_with_no_window_shows_on_the_main_screen() {
+    let monitors = vec![
+        monitor("main", 0.0, 0.0, 1920.0, 1080.0, 1.0),
+        monitor("other", 1920.0, 0.0, 1920.0, 1080.0, 1.0),
+    ];
+    let b_platform = FakePlatform::new(monitors);
+    b_platform.set_running_apps(vec![RunningApp {
+        monitors: vec![],
+        ..player("spotify", Some(true))
+    }]);
+    let mut a = Device::start("alpha").await;
+    let mut b = Device::start_with("bravo", b_platform).await;
+    let b_id = b.fingerprint();
+    pair(&mut a, &mut b).await;
+
+    a.wait_for("it on the main screen", |s| {
+        apps_on_screen(s, b_id, "main") == ["spotify"]
+            && apps_on_screen(s, b_id, "other").is_empty()
+    })
+    .await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_pcs_apps_go_when_it_does() {
+    let (mut a, b) = side_by_side().await;
+    let b_id = b.fingerprint();
+    b.platform
+        .set_running_apps(vec![window_of("code", "Code", &["fake-0"])]);
+    a.wait_for("its apps", |s| {
+        apps_on_screen(s, b_id, "fake-0") == ["code"]
+    })
+    .await;
+
+    b.stop().await;
+    a.wait_for("them gone", |s| {
+        s.devices
+            .iter()
+            .any(|d| d.fingerprint == b_id && d.status == DeviceStatus::Offline)
+            && apps_on_screen(s, b_id, "fake-0").is_empty()
+    })
+    .await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_picture_of_each_app_is_looked_for_once_and_reaches_the_other_pc() {
+    let b_platform = FakePlatform::with_screens(1);
+    b_platform.set_app_icon("code", b"\x89PNG and the rest".to_vec());
+    b_platform.set_running_apps(vec![
+        window_of("code", "Code", &["fake-0"]),
+        window_of("no-picture", "No picture", &["fake-0"]),
+    ]);
+    let mut a = Device::start("alpha").await;
+    let mut b = Device::start_with("bravo", b_platform).await;
+    let b_id = b.fingerprint();
+    pair(&mut a, &mut b).await;
+
+    let shown_on = |state: &UiState, id: &str| {
+        state
+            .screens
+            .iter()
+            .filter(|screen| screen.device == b_id)
+            .flat_map(|screen| &screen.apps)
+            .find(|app| app.id == id)
+            .and_then(|app| app.icon.clone())
+    };
+    a.wait_for("the picture", |s| shown_on(s, "code").is_some())
+        .await;
+    let shown = shown_on(&a.state, "code").unwrap();
+    assert!(shown.starts_with("data:image/png;base64,"), "{shown}");
+    assert_eq!(shown_on(&a.state, "no-picture"), None);
+
+    // Several looks later, only a new app is any more work.
+    b.platform.set_running_apps(vec![
+        window_of("code", "Code", &["fake-0"]),
+        window_of("new", "New", &["fake-0"]),
+    ]);
+    a.wait_for("the new app", |s| {
+        apps_on_screen(s, b_id, "fake-0") == ["code", "new"]
+    })
+    .await;
+    let mut asked = b.platform.icons_asked_for();
+    asked.sort();
+    assert_eq!(asked, ["code", "new", "no-picture"]);
+}
+
+/// A device could say anything about an app, and this goes straight into the page.
+#[tokio::test(flavor = "multi_thread")]
+async fn what_another_pc_says_about_its_apps_is_kept_in_bounds() {
+    let (mut a, identity, a_id) = with_a_paired_device_to_play("other-pc").await;
+    let other_id = identity.fingerprint();
+    let endpoint = Endpoint::bind(
+        &identity,
+        "127.0.0.1:0".parse().unwrap(),
+        TrustStore::new([a_id]),
+    )
+    .unwrap();
+    let link = endpoint
+        .connect(a.address().parse().unwrap(), a_id)
+        .await
+        .unwrap();
+    let (mut sender, _receiver) = link.split();
+    let screen = monitor("m", 0.0, 0.0, 800.0, 600.0, 1.0);
+    sender
+        .send(&hello_from("other-pc", FEATURES, vec![screen]))
+        .await
+        .unwrap();
+    a.wait_connected_to(other_id).await;
+
+    let long = "x".repeat(10_000);
+    sender
+        .send(&Message::AppIcon {
+            app: "script".into(),
+            png: b"<svg onload=alert(1)>".to_vec(),
+        })
+        .await
+        .unwrap();
+    sender
+        .send(&Message::AppIcon {
+            app: "huge".into(),
+            png: [b"\x89PNG".as_slice(), &[0; 100_000]].concat(),
+        })
+        .await
+        .unwrap();
+    let mut too_many = vec![
+        window_of(&long, &long, &["m"]),
+        window_of("script", "Script", &["m"]),
+        window_of("huge", "Huge", &["m"]),
+    ];
+    too_many.extend((0..500).map(|i| window_of(&format!("app{i}"), "App", &["m"])));
+    sender.send(&Message::Apps(too_many)).await.unwrap();
+
+    a.wait_for("the list", |s| !apps_on_screen(s, other_id, "m").is_empty())
+        .await;
+    let screen = a
+        .state
+        .screens
+        .iter()
+        .find(|screen| screen.device == other_id)
+        .unwrap();
+    assert_eq!(screen.apps.len(), hk_core::apps::MAX_APPS);
+    assert_eq!(screen.apps[0].id.len(), hk_core::apps::MAX_APP_TEXT);
+    assert_eq!(screen.apps[0].name.len(), hk_core::apps::MAX_APP_TEXT);
+    assert!(screen.apps.iter().all(|app| app.icon.is_none()));
+}
+
+/// Copies of Hackerman from before this have no use for these, and the oldest drop the
+/// connection on a message they don't know. These are what 0.8.0 says it can do.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_pc_on_an_older_version_hears_nothing_about_apps() {
+    let (a, identity, a_id) = with_a_paired_device_to_play("older").await;
+    a.platform
+        .set_running_apps(vec![player("spotify", Some(true))]);
+    a.platform.set_app_icon("spotify", b"\x89PNG".to_vec());
+    let endpoint = Endpoint::bind(
+        &identity,
+        "127.0.0.1:0".parse().unwrap(),
+        TrustStore::new([a_id]),
+    )
+    .unwrap();
+    let link = endpoint
+        .connect(a.address().parse().unwrap(), a_id)
+        .await
+        .unwrap();
+    let (mut sender, mut receiver) = link.split();
+    let screen = monitor("m", 0.0, 0.0, 800.0, 600.0, 1.0);
+    sender
+        .send(&hello_from(
+            "older",
+            FEATURE_FILES | FEATURE_SEND_FILES,
+            vec![screen],
+        ))
+        .await
+        .unwrap();
+
+    // Long enough to have looked at the apps more than once, with the connection up.
+    let heard = tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            match receiver.recv().await {
+                Ok(Message::Apps(_) | Message::AppIcon { .. } | Message::Media { .. }) => {
+                    return true;
+                }
+                Ok(_) => {}
+                Err(error) => panic!("the connection went: {error}"),
+            }
+        }
+    })
+    .await;
+    assert!(heard.is_err(), "it should have heard nothing about apps");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_pc_can_keep_its_apps_to_itself() {
+    let (mut a, mut b) = side_by_side().await;
+    let b_id = b.fingerprint();
+    b.platform
+        .set_running_apps(vec![window_of("code", "Code", &["fake-0"])]);
+    a.wait_for("its apps", |s| {
+        apps_on_screen(s, b_id, "fake-0") == ["code"]
+    })
+    .await;
+
+    b.request(Request::SetRules {
+        rules: Rules {
+            share_apps: false,
+            ..Rules::default()
+        },
+    })
+    .await;
+    a.wait_for("them gone from the other PC", |s| {
+        apps_on_screen(s, b_id, "fake-0").is_empty()
+    })
+    .await;
+    b.wait_for("them still showing on its own", |s| {
+        apps_on_screen(s, b_id, "fake-0") == ["code"]
+    })
+    .await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_pc_that_turns_sharing_off_stops_saying_whats_open() {
+    let (mut a, mut b) = side_by_side().await;
+    let b_id = b.fingerprint();
+    b.platform
+        .set_running_apps(vec![window_of("code", "Code", &["fake-0"])]);
+    a.wait_for("its apps", |s| {
+        apps_on_screen(s, b_id, "fake-0") == ["code"]
+    })
+    .await;
+    b.request(Request::SetEnabled { enabled: false }).await;
+    a.wait_for("them gone", |s| {
+        apps_on_screen(s, b_id, "fake-0").is_empty()
+    })
+    .await;
+}
+
+/// The buttons on the drawing of a screen.
+#[tokio::test(flavor = "multi_thread")]
+async fn the_buttons_on_a_screen_reach_the_player_on_that_pc() {
+    let (mut a, b) = side_by_side().await;
+    let (a_id, b_id) = (a.fingerprint(), b.fingerprint());
+    b.platform
+        .set_running_apps(vec![player("spotify", Some(true))]);
+    a.wait_for("the player", |s| shows_playing(s, b_id, "spotify", true))
+        .await;
+
+    for command in [
+        MediaCommand::PlayPause,
+        MediaCommand::Back,
+        MediaCommand::Forward,
+    ] {
+        a.request(Request::MediaCommand {
+            device: b_id,
+            app: "spotify".into(),
+            command,
+        })
+        .await;
+        wait_for_media_command(&b, "spotify", command).await;
+    }
+    assert!(a.platform.media_commands().is_empty());
+
+    // And this PC's own, without leaving it.
+    a.platform.set_running_apps(vec![player("stremio", None)]);
+    a.request(Request::MediaCommand {
+        device: a_id,
+        app: "stremio".into(),
+        command: MediaCommand::PlayPause,
+    })
+    .await;
+    wait_for_media_command(&a, "stremio", MediaCommand::PlayPause).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_change_on_the_player_soon_shows_on_the_other_pc() {
+    let (mut a, b) = side_by_side().await;
+    let b_id = b.fingerprint();
+    b.platform
+        .set_running_apps(vec![player("spotify", Some(true))]);
+    a.wait_for("playing", |s| shows_playing(s, b_id, "spotify", true))
+        .await;
+
+    // The button is pressed, and the player has paused by the time it's looked at.
+    b.platform
+        .set_running_apps(vec![player("spotify", Some(false))]);
+    a.request(Request::MediaCommand {
+        device: b_id,
+        app: "spotify".into(),
+        command: MediaCommand::PlayPause,
+    })
+    .await;
+    a.wait_for("paused", |s| shows_playing(s, b_id, "spotify", false))
+        .await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_pc_can_refuse_to_have_its_media_controlled() {
+    let (mut a, mut b) = side_by_side().await;
+    let b_id = b.fingerprint();
+    b.platform
+        .set_running_apps(vec![player("spotify", Some(true))]);
+    a.wait_for("the player", |s| shows_playing(s, b_id, "spotify", true))
+        .await;
+
+    b.request(Request::SetRules {
+        rules: Rules {
+            media_control: false,
+            ..Rules::default()
+        },
+    })
+    .await;
+    // The app's still shown, but nothing says it can be controlled.
+    a.wait_for("no controls", |s| {
+        apps_on_screen(s, b_id, "fake-0") == ["spotify"] && !shows_playing(s, b_id, "spotify", true)
+    })
+    .await;
+
+    // Asking anyway does nothing.
+    a.request(Request::MediaCommand {
+        device: b_id,
+        app: "spotify".into(),
+        command: MediaCommand::PlayPause,
+    })
+    .await;
+    let_things_settle().await;
+    assert!(b.platform.media_commands().is_empty());
+}
+
+/// Only what's listed as a player can be asked to do anything.
+#[tokio::test(flavor = "multi_thread")]
+async fn another_pc_cant_send_commands_to_just_anything() {
+    let (mut a, b) = side_by_side().await;
+    let b_id = b.fingerprint();
+    b.platform.set_running_apps(vec![
+        player("spotify", Some(true)),
+        window_of("notepad", "Notepad", &["fake-0"]),
+    ]);
+    a.wait_for("the player", |s| shows_playing(s, b_id, "spotify", true))
+        .await;
+    for app in ["notepad", "something-not-running"] {
+        a.request(Request::MediaCommand {
+            device: b_id,
+            app: app.into(),
+            command: MediaCommand::PlayPause,
+        })
+        .await;
+    }
+    let_things_settle().await;
+    assert!(b.platform.media_commands().is_empty());
+}
+
+/// A locked PC says nothing about what's open, and isn't to be controlled.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_locked_pc_says_nothing_about_its_apps_and_cant_be_asked_to_do_anything() {
+    let (a, mut b) = side_by_side().await;
+    let (a_id, b_id) = (a.fingerprint(), b.fingerprint());
+    a.platform
+        .set_running_apps(vec![player("spotify", Some(true))]);
+    b.wait_for("the player", |s| shows_playing(s, a_id, "spotify", true))
+        .await;
+
+    a.platform.set_should_step_aside(true);
+    let (dir, _, _) = a.wait_until_it_steps_aside().await;
+    b.wait_for("it gone", |s| apps_on_screen(s, a_id, "fake-0").is_empty())
+        .await;
+
+    let helper = Device::start_lock_screen_helper("alpha", &dir, &[b_id]).await;
+    helper
+        .platform
+        .set_running_apps(vec![player("spotify", Some(true))]);
+    b.wait_connected_to(a_id).await;
+
+    b.request(Request::MediaCommand {
+        device: a_id,
+        app: "spotify".into(),
+        command: MediaCommand::PlayPause,
+    })
+    .await;
+    tokio::time::sleep(TICK_AND_A_BIT).await;
+    b.request(Request::MediaCommand {
+        device: a_id,
+        app: "spotify".into(),
+        command: MediaCommand::PlayPause,
+    })
+    .await;
+    let_things_settle().await;
+    assert!(apps_on_screen(&b.state, a_id, "fake-0").is_empty());
+    assert!(helper.platform.media_commands().is_empty());
 }

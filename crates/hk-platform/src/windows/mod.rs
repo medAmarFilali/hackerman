@@ -1,5 +1,6 @@
 //! Windows: global low-level hooks to capture input, `SendInput` to replay it.
 
+mod apps;
 mod clipboard;
 mod cursor;
 mod displays;
@@ -7,6 +8,7 @@ mod hardware;
 mod hook;
 mod inject;
 mod keymap;
+mod media;
 pub mod session;
 mod virtual_files;
 
@@ -17,6 +19,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use hk_core::apps::{MediaCommand, RunningApp};
 use hk_core::clipboard::{ClipboardData, SharedFile};
 use hk_core::geometry::Point;
 use hk_core::input::InputEvent;
@@ -233,6 +236,25 @@ impl Platform for NativePlatform {
     ) -> Result<(), Error> {
         virtual_files::put_on_clipboard(files, source)
     }
+
+    fn running_apps(&self) -> Vec<RunningApp> {
+        // The system's helper has no apps of its own, and no business with the user's.
+        match self.role {
+            Role::Agent => apps::running(),
+            Role::Helper { .. } => Vec::new(),
+        }
+    }
+
+    fn app_icon(&self, app: &str) -> Option<Vec<u8>> {
+        apps::icon(app)
+    }
+
+    fn media_command(&self, app: &str, command: MediaCommand) -> Result<(), Error> {
+        match self.role {
+            Role::Agent => media::command(app, command),
+            Role::Helper { .. } => Err(Error::Media("the screen is locked".to_string())),
+        }
+    }
 }
 
 /// These use the real cursor and real input hooks on the machine running them, so
@@ -268,6 +290,50 @@ mod real_machine_tests {
 
     fn settle() {
         std::thread::sleep(Duration::from_millis(150));
+    }
+
+    /// Only looks. Run with `--nocapture` to see what it finds:
+    /// `cargo test -p hk-platform apps_on_this -- --ignored --nocapture`
+    #[test]
+    #[ignore = "depends on what's open on this computer"]
+    fn the_apps_on_this_computer_make_sense() {
+        let platform = native().unwrap();
+        let monitors: Vec<String> = platform.monitors().into_iter().map(|m| m.id).collect();
+        let start = std::time::Instant::now();
+        let apps = platform.running_apps();
+        println!("{} apps in {:?}", apps.len(), start.elapsed());
+        for app in &apps {
+            let start = std::time::Instant::now();
+            let icon = platform.app_icon(&app.id);
+            println!(
+                "{:<28} {:<24} monitors: {} minimized: {} media: {:?} icon: {:?} ({:?})",
+                app.id,
+                app.name,
+                app.monitors.len(),
+                app.minimized,
+                app.media,
+                icon.as_ref().map(Vec::len),
+                start.elapsed(),
+            );
+            assert!(!app.id.is_empty() && !app.name.is_empty());
+            for monitor in &app.monitors {
+                assert!(monitors.contains(monitor), "{monitor} isn't a monitor here");
+            }
+            if let Some(icon) = icon {
+                assert_eq!(&icon[..4], b"\x89PNG");
+                assert!(
+                    icon.len() <= hk_core::apps::MAX_ICON_BYTES,
+                    "{}",
+                    icon.len()
+                );
+            }
+        }
+        assert!(
+            !apps
+                .iter()
+                .any(|app| app.id == "hackerman" || app.id == "shellexperiencehost"),
+            "these aren't apps someone opened"
+        );
     }
 
     /// Only looks, so it runs with the others.

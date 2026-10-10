@@ -6,6 +6,7 @@ import {
   Keyboard,
   MonitorCog,
   MousePointer2,
+  Music,
   Palette,
   Paperclip,
   Settings,
@@ -80,12 +81,20 @@ const THEMES: { value: ThemeChoice; label: string }[] = [
   { value: "system", label: "Same as Windows" },
 ];
 
-type SectionId = "general" | "cursor" | "files" | "appearance" | "shortcuts" | "about";
+type SectionId =
+  | "general"
+  | "cursor"
+  | "files"
+  | "media"
+  | "appearance"
+  | "shortcuts"
+  | "about";
 
 const SECTIONS: { id: SectionId; label: string; icon: LucideIcon }[] = [
   { id: "general", label: "General", icon: MonitorCog },
   { id: "cursor", label: "Cursor", icon: MousePointer2 },
   { id: "files", label: "Clipboard & files", icon: Paperclip },
+  { id: "media", label: "Apps & media", icon: Music },
   { id: "appearance", label: "Appearance", icon: Palette },
   { id: "shortcuts", label: "Shortcuts", icon: Keyboard },
   { id: "about", label: "About", icon: Info },
@@ -145,6 +154,7 @@ export function SettingsDialog({ state }: { state: UiState }) {
                 {section === "general" && <General state={state} open={open} />}
                 {section === "cursor" && <Cursor rules={rules} update={update} />}
                 {section === "files" && <Files state={state} update={update} />}
+                {section === "media" && <AppsAndMedia rules={rules} update={update} />}
                 {section === "appearance" && <Appearance />}
                 {section === "shortcuts" && <Shortcuts state={state} update={update} />}
                 {section === "about" && <About state={state} />}
@@ -545,6 +555,44 @@ function AllowedPcs({ state }: { state: UiState }) {
         </div>
       ))}
     </div>
+  );
+}
+
+function AppsAndMedia({
+  rules,
+  update,
+}: {
+  rules: Rules;
+  update: (change: Partial<Rules>) => void;
+}) {
+  const { appsOnScreens, mediaButtons } = useAppearance();
+  return (
+    <>
+      <SwitchRow
+        label="Show apps on the screens"
+        description="Draws the icons of the apps open on each screen on the canvas."
+        checked={appsOnScreens}
+        onChange={(on) => changeAppearance({ appsOnScreens: on })}
+      />
+      <SwitchRow
+        label="Show media buttons"
+        description="Puts back, pause and forward on the screens where something like Spotify or Stremio is open."
+        checked={mediaButtons}
+        onChange={(on) => changeAppearance({ mediaButtons: on })}
+      />
+      <SwitchRow
+        label="Let other PCs see what's open here"
+        description="Sends the names and icons of the apps open on this PC to your paired PCs. Window titles, and what's in the windows, are never sent."
+        checked={rules.shareApps}
+        onChange={(shareApps) => update({ shareApps })}
+      />
+      <SwitchRow
+        label="Let other PCs control media here"
+        description="Lets your paired PCs play, pause and skip what's playing on this PC."
+        checked={rules.mediaControl}
+        onChange={(mediaControl) => update({ mediaControl })}
+      />
+    </>
   );
 }
 

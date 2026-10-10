@@ -8,6 +8,7 @@
 
 mod transport;
 
+use hk_core::apps::{MediaCommand, MediaState};
 use hk_core::device::Fingerprint;
 use hk_core::layout::Placement;
 use hk_core::rules::Rules;
@@ -81,6 +82,12 @@ pub enum Request {
     SetFilesAllowed {
         device: Fingerprint,
         allowed: bool,
+    },
+    /// Play, pause or skip what's playing in an app on a device, which may be this one.
+    MediaCommand {
+        device: Fingerprint,
+        app: String,
+        command: MediaCommand,
     },
     /// Stop the agent.
     Shutdown,
@@ -228,6 +235,21 @@ pub struct ScreenView {
     pub scale: f64,
     pub primary: bool,
     pub online: bool,
+    /// What's open on this screen, frontmost first.
+    pub apps: Vec<AppView>,
+}
+
+/// An app on a screen on the canvas.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AppView {
+    pub id: String,
+    pub name: String,
+    /// A picture of it, ready to show. Some apps have none to be found.
+    pub icon: Option<String>,
+    pub minimized: bool,
+    /// Set if it can be played and paused from here.
+    pub media: Option<MediaState>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -396,6 +418,8 @@ mod tests {
             saved_layouts: 3,
         };
         let json = serde_json::to_value(&state).unwrap();
+        assert_eq!(json["rules"]["shareApps"], true);
+        assert_eq!(json["rules"]["mediaControl"], true);
         assert_eq!(json["layoutSaved"], true);
         assert_eq!(json["savedLayouts"], 3);
         assert_eq!(json["devices"][0]["filesAllowed"], true);
@@ -415,6 +439,39 @@ mod tests {
         assert_eq!(json["devices"][0]["status"], "incompatible");
         assert_eq!(json["devices"][0]["needsUpdateForFiles"], true);
         assert_eq!(json["control"]["state"], "home");
+    }
+
+    #[test]
+    fn media_uses_the_format_the_app_sends_and_reads() {
+        let request: Request = serde_json::from_str(&format!(
+            r#"{{"type":"mediaCommand","device":"{DEVICE}","app":"spotify","command":"playPause"}}"#
+        ))
+        .unwrap();
+        assert_eq!(
+            request,
+            Request::MediaCommand {
+                device: DEVICE,
+                app: "spotify".into(),
+                command: MediaCommand::PlayPause,
+            }
+        );
+
+        let json = serde_json::to_value(AppView {
+            id: "spotify".into(),
+            name: "Spotify".into(),
+            icon: Some("data:image/png;base64,AA==".into()),
+            minimized: true,
+            media: Some(MediaState {
+                playing: None,
+                can_go_back: true,
+                can_go_forward: false,
+            }),
+        })
+        .unwrap();
+        assert_eq!(json["icon"], "data:image/png;base64,AA==");
+        assert_eq!(json["media"]["playing"], serde_json::Value::Null);
+        assert_eq!(json["media"]["canGoBack"], true);
+        assert_eq!(json["media"]["canGoForward"], false);
     }
 
     #[test]

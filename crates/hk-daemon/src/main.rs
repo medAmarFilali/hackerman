@@ -15,6 +15,7 @@
 use std::path::PathBuf;
 
 use anyhow::{Context, Result, bail};
+use hk_core::apps::{MediaState, RunningApp};
 use hk_daemon::{Options, default_options, log_filter, run};
 use hk_platform::fake::FakePlatform;
 
@@ -31,7 +32,9 @@ async fn main() -> Result<()> {
         Some(screens) => {
             options.capture = false;
             options.headless_pairing = true;
-            run_until_stopped(options, FakePlatform::with_screens(screens)).await
+            let platform = FakePlatform::with_screens(screens);
+            platform.set_running_apps(simulated_apps());
+            run_until_stopped(options, platform).await
         }
         None => run_until_stopped(options, hk_platform::native()?).await,
     }
@@ -45,6 +48,30 @@ async fn run_until_stopped(options: Options, platform: impl hk_platform::Platfor
             Ok(())
         }
     }
+}
+
+/// A few apps open on a simulated device, to try things out on.
+fn simulated_apps() -> Vec<RunningApp> {
+    let app = |id: &str, name: &str, media| RunningApp {
+        id: id.into(),
+        name: name.into(),
+        monitors: vec!["fake-0".into()],
+        minimized: false,
+        media,
+    };
+    vec![
+        app("notepad", "Notepad", None),
+        app("explorer", "File Explorer", None),
+        app(
+            "player",
+            "Player",
+            Some(MediaState {
+                playing: Some(true),
+                can_go_back: true,
+                can_go_forward: true,
+            }),
+        ),
+    ]
 }
 
 /// Applies command-line options. Returns the number of monitors to simulate, if any.

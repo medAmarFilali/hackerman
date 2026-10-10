@@ -136,6 +136,24 @@ What's copied on a disabled computer stays there, and enabling it doesn't replac
 with anything copied elsewhere in the meantime. Whatever is copied next travels as
 usual.
 
+### What's open, and what's playing
+
+Each screen on the canvas shows the icons of the apps open on it, on every computer. Faded
+ones are minimized. Only the names and icons of apps are sent, never window titles or
+anything in the windows.
+
+A screen with something playing on it has back, pause and forward buttons, for players that
+tell Windows what they're doing, such as Spotify or a video in a browser, and for Stremio. An
+app playing from the tray has them on the computer's main screen. Forward and back skip to the
+next or previous track. Where there isn't one, as with a film, they go 10 seconds either way.
+
+Stremio doesn't tell Windows what it's doing, so its button can't show whether it's playing,
+and it's sent Stremio's own keys: Space and the left and right arrows.
+
+**Settings > Apps & media** turns the icons and the buttons off, on this computer's canvas, and
+can stop other computers seeing what's open here or controlling what's playing here. A locked
+computer does neither. All your computers need this version for any of this.
+
 ### Keyboard shortcuts
 
 | Keys | What they do |

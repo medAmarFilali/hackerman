@@ -16,6 +16,7 @@ use std::io::Read;
 use std::path::PathBuf;
 use std::sync::Arc;
 
+use hk_core::apps::{MediaCommand, RunningApp};
 use hk_core::clipboard::{ClipboardData, SharedFile};
 use hk_core::geometry::Point;
 use hk_core::input::InputEvent;
@@ -101,6 +102,23 @@ pub trait Platform: Clone + Send + Sync + 'static {
         files: Vec<SharedFile>,
         source: Arc<dyn FileSource>,
     ) -> Result<(), Error>;
+
+    /// The apps open here, frontmost first, and whatever is playing. May wait on other
+    /// programs. Window titles stay out of this: they can say what someone is working on.
+    fn running_apps(&self) -> Vec<RunningApp> {
+        Vec::new()
+    }
+
+    /// A small picture of an app from [`Platform::running_apps`], as a PNG. May wait on
+    /// other programs.
+    fn app_icon(&self, _app: &str) -> Option<Vec<u8>> {
+        None
+    }
+
+    /// Asks an app from [`Platform::running_apps`] to do this. May wait on it.
+    fn media_command(&self, _app: &str, _command: MediaCommand) -> Result<(), Error> {
+        Err(Error::Unsupported)
+    }
 }
 
 /// Where the content of files on the clipboard comes from when they're elsewhere.
@@ -127,4 +145,6 @@ pub enum Error {
     Clipboard(String),
     #[error("installing the input hooks failed: {0}")]
     Hook(String),
+    #[error("media controls: {0}")]
+    Media(String),
 }

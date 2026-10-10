@@ -52,6 +52,8 @@ fn rules_while_locked() -> Rules {
         receive_files: ReceiveFiles::Never,
         drop_folder: None,
         notify_files: false,
+        share_apps: false,
+        media_control: false,
         ..Rules::default()
     }
 }
@@ -304,6 +306,8 @@ mod tests {
         assert!(!rules.shortcuts);
         assert!(!rules.stay_in_fullscreen);
         assert!(!rules.notify_files);
+        assert!(!rules.share_apps);
+        assert!(!rules.media_control);
         assert_eq!(rules.receive_files, ReceiveFiles::Never);
         assert_eq!(rules.drop_folder, None);
         assert_eq!(rules.cross_modifier, CrossModifier::None);

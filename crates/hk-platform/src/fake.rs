@@ -4,6 +4,7 @@ use std::io::Read;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
+use hk_core::apps::{MediaCommand, RunningApp};
 use hk_core::clipboard::{ClipboardData, SharedFile};
 use hk_core::geometry::{Point, Rect};
 use hk_core::input::InputEvent;
@@ -31,6 +32,10 @@ struct State {
     fullscreen: bool,
     model: Option<String>,
     desktop: Option<PathBuf>,
+    apps: Vec<RunningApp>,
+    icons: Vec<(String, Vec<u8>)>,
+    icons_asked_for: Vec<String>,
+    media_commands: Vec<(String, MediaCommand)>,
 }
 
 type ClipboardWatcher = Box<dyn FnMut() + Send>;
@@ -183,6 +188,25 @@ impl FakePlatform {
         self.state().fullscreen = fullscreen;
     }
 
+    /// Simulates these apps being open.
+    pub fn set_running_apps(&self, apps: Vec<RunningApp>) {
+        self.state().apps = apps;
+    }
+
+    pub fn set_app_icon(&self, app: &str, png: Vec<u8>) {
+        self.state().icons.push((app.to_string(), png));
+    }
+
+    /// Which apps have had their pictures looked for, in order.
+    pub fn icons_asked_for(&self) -> Vec<String> {
+        self.state().icons_asked_for.clone()
+    }
+
+    /// What apps here have been asked to do so far.
+    pub fn media_commands(&self) -> Vec<(String, MediaCommand)> {
+        self.state().media_commands.clone()
+    }
+
     pub fn cursor_hidden(&self) -> bool {
         self.state().cursor_hidden
     }
@@ -277,6 +301,22 @@ impl Platform for FakePlatform {
         state.copied_files.clear();
         state.files_to_paste.clear();
         state.file_source = None;
+        Ok(())
+    }
+
+    fn running_apps(&self) -> Vec<RunningApp> {
+        self.state().apps.clone()
+    }
+
+    fn app_icon(&self, app: &str) -> Option<Vec<u8>> {
+        let mut state = self.state();
+        state.icons_asked_for.push(app.to_string());
+        let found = state.icons.iter().find(|(id, _)| id == app);
+        found.map(|(_, png)| png.clone())
+    }
+
+    fn media_command(&self, app: &str, command: MediaCommand) -> Result<(), Error> {
+        self.state().media_commands.push((app.to_string(), command));
         Ok(())
     }
 }

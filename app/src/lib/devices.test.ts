@@ -41,6 +41,8 @@ function stateWith(change: Partial<UiState> = {}): UiState {
       receiveFiles: "askFirst",
       nameClash: "keepBoth",
       notifyFiles: true,
+      shareApps: true,
+      mediaControl: true,
     },
     enabled: true,
     locked: false,
@@ -128,6 +130,7 @@ describe("isLaptop", () => {
     scale: 1,
     primary: true,
     online: true,
+    apps: [],
   });
 
   it("goes by whether a PC has a built-in display", () => {

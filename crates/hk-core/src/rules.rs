@@ -29,6 +29,10 @@ pub struct Rules {
     /// Show a notification when files from another device have arrived, since that
     /// can happen with the window closed.
     pub notify_files: bool,
+    /// Tell other devices the names of the apps open here.
+    pub share_apps: bool,
+    /// Let other devices play, pause and skip what's playing here.
+    pub media_control: bool,
 }
 
 impl Default for Rules {
@@ -44,6 +48,8 @@ impl Default for Rules {
             drop_folder: None,
             name_clash: NameClash::default(),
             notify_files: true,
+            share_apps: true,
+            media_control: true,
         }
     }
 }
@@ -105,6 +111,8 @@ mod tests {
         assert_eq!(rules.drop_folder, None);
         assert_eq!(rules.name_clash, NameClash::KeepBoth);
         assert!(rules.notify_files);
+        assert!(rules.share_apps);
+        assert!(rules.media_control);
     }
 
     #[test]

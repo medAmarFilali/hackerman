@@ -13,6 +13,8 @@ use std::sync::{Arc, PoisonError};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result};
+use base64::Engine as _;
+use hk_core::apps::{self, MAX_ICON_BYTES, MAX_ICONS, MediaCommand, RunningApp};
 use hk_core::clipboard::{ClipVersion, ClipboardData, MAX_SHARED_FILES, SharedFile};
 use hk_core::device::Fingerprint;
 use hk_core::layout::{DeviceMonitors, LayoutDoc, Monitor, Placement, Topology};
@@ -20,7 +22,7 @@ use hk_core::rules::ReceiveFiles;
 use hk_core::rules::Rules;
 use hk_core::switcher::Switcher;
 use hk_ipc::{
-    ControlView, DeviceStatus, DeviceView, IncomingFilesView, IpcConnection, IpcListener,
+    AppView, ControlView, DeviceStatus, DeviceView, IncomingFilesView, IpcConnection, IpcListener,
     PairingStage, PairingView, Request, ScreenView, ThisDevice, TransferStage, TransferView,
     UiState,
 };
@@ -30,8 +32,8 @@ use hk_net::{
 };
 use hk_platform::{Capture, FileSource, Platform};
 use hk_proto::{
-    ClipboardBlob, FEATURE_FILES, FEATURE_SEND_FILES, FEATURES, Message, PROTOCOL_VERSION,
-    TransferUpdate,
+    ClipboardBlob, FEATURE_APPS, FEATURE_FILES, FEATURE_MEDIA, FEATURE_SEND_FILES, FEATURES,
+    Message, PROTOCOL_VERSION, TransferUpdate,
 };
 use tokio::runtime::Handle;
 use tokio::sync::mpsc::{self, UnboundedReceiver, UnboundedSender};
@@ -78,6 +80,8 @@ const FINISHED_TRANSFERS_KEPT: usize = 20;
 const INCOMPATIBLE_DIALS_EVERY_N_TICKS: u64 = 15;
 /// A tick this late means the agent was held up, or the computer was asleep.
 const HELD_UP_AFTER: Duration = Duration::from_secs(5);
+/// How long a player takes to change what it says it's doing, after being asked to.
+const MEDIA_SETTLES: Duration = Duration::from_millis(300);
 
 pub struct Options {
     /// Where to keep settings, the identity and saved data.
@@ -192,6 +196,31 @@ pub enum Event {
         peer: Fingerprint,
         id: ClipVersion,
     },
+    /// What's open here, as just looked up.
+    AppsRead {
+        apps: Vec<RunningApp>,
+        /// Pictures of apps seen for the first time. Not all of them have one.
+        icons: Vec<(String, Vec<u8>)>,
+        /// Which apps have now had their pictures looked for.
+        looked_for: Vec<String>,
+    },
+    /// It's worth looking again at what's open here.
+    RefreshApps,
+    PeerApps {
+        peer: Fingerprint,
+        apps: Vec<RunningApp>,
+    },
+    PeerAppIcon {
+        peer: Fingerprint,
+        app: String,
+        png: Vec<u8>,
+    },
+    /// A device wants something done with an app here.
+    MediaRequested {
+        peer: Fingerprint,
+        app: String,
+        command: MediaCommand,
+    },
     PairingStage {
         peer_name: Option<String>,
         stage: PairingStage,
@@ -212,7 +241,12 @@ struct Session {
     up: bool,
     /// What the peer said it can do beyond the base protocol.
     features: u32,
+    /// Which apps' pictures the peer has been sent on this connection.
+    icons_sent: HashSet<String>,
 }
+
+/// Which app on which device.
+type AppOn = (Fingerprint, String);
 
 /// Files going from here to a folder on another device, or into a folder here.
 struct Transfer {
@@ -291,6 +325,17 @@ struct Engine<P: Platform> {
     last_state: Option<UiState>,
     ticks: u64,
     last_tick: Instant,
+    /// What's open on this computer. Looking takes a moment and could wait on other
+    /// programs, so it's done off to the side, one look at a time.
+    local_apps: Vec<RunningApp>,
+    reading_apps: bool,
+    /// Pictures of the apps here, to send to other devices.
+    local_icons: BTreeMap<String, Vec<u8>>,
+    icons_looked_for: HashSet<String>,
+    /// What's open on other devices, for as long as they're connected.
+    peer_apps: BTreeMap<Fingerprint, Vec<RunningApp>>,
+    /// Pictures of apps on every device, ready for the app to show.
+    icon_urls: BTreeMap<AppOn, String>,
     // These keep input capture and clipboard watching running.
     capture: Option<Capture>,
     _clipboard_watcher: Option<Capture>,
@@ -423,6 +468,12 @@ pub async fn run<P: Platform>(options: Options, platform: P) -> Result<()> {
         last_state: None,
         ticks: 0,
         last_tick: Instant::now(),
+        local_apps: Vec::new(),
+        reading_apps: false,
+        local_icons: BTreeMap::new(),
+        icons_looked_for: HashSet::new(),
+        peer_apps: BTreeMap::new(),
+        icon_urls: BTreeMap::new(),
         capture,
         _clipboard_watcher: clipboard_watcher,
     };
@@ -623,6 +674,7 @@ impl<P: Platform> Engine<P> {
                 "the agent was held up, or this computer was asleep"
             );
         }
+        self.read_apps();
         let monitors = self.shared.platform.monitors();
         if monitors != self.monitors {
             tracing::info!(count = monitors.len(), "monitors changed");
@@ -739,6 +791,17 @@ impl<P: Platform> Engine<P> {
                 self.on_transfer_updated(peer, id, update);
             }
             Event::TransferCancelled { peer, id } => self.on_transfer_cancelled(peer, id),
+            Event::AppsRead {
+                apps,
+                icons,
+                looked_for,
+            } => self.on_apps_read(apps, icons, looked_for),
+            Event::RefreshApps => self.read_apps(),
+            Event::PeerApps { peer, apps } => self.on_peer_apps(peer, apps),
+            Event::PeerAppIcon { peer, app, png } => self.on_peer_app_icon(peer, app, png),
+            Event::MediaRequested { peer, app, command } => {
+                self.on_media_requested(peer, app, command);
+            }
             Event::PairingStage { peer_name, stage } => {
                 if let Some(pairing) = &mut self.pairing {
                     pairing.view = PairingView { peer_name, stage };
@@ -807,6 +870,11 @@ impl<P: Platform> Engine<P> {
             Request::SetFilesAllowed { device, allowed } => {
                 self.set_files_allowed(device, allowed);
             }
+            Request::MediaCommand {
+                device,
+                app,
+                command,
+            } => self.send_media_command(device, app, command),
             Request::Shutdown => {} // Handled by the main loop.
         }
     }
@@ -841,6 +909,7 @@ impl<P: Platform> Engine<P> {
         }
         self.check_fullscreen();
         self.broadcast(&Message::Enabled(enabled));
+        self.tell_peers_about_apps();
         self.rebuild();
     }
 
@@ -891,7 +960,201 @@ impl<P: Platform> Engine<P> {
         }
         self.shared.switcher().set_rules(rules);
         self.check_fullscreen();
+        self.tell_peers_about_apps();
+        self.read_apps();
         self.notify();
+    }
+
+    // What's open, and what's playing
+
+    /// Starts a look at what's open here, unless nothing would use the answer. That's the
+    /// case for the lock-screen helper, which has no business looking.
+    fn read_apps(&mut self) {
+        let rules = &self.settings.rules;
+        self.apps.retain(|app| !app.is_closed());
+        let wanted = rules.share_apps || rules.media_control || !self.apps.is_empty();
+        if !wanted || self.reading_apps {
+            return;
+        }
+        self.reading_apps = true;
+        let platform = self.shared.platform.clone();
+        let events = self.events.clone();
+        let mut looked_for = self.icons_looked_for.clone();
+        tokio::task::spawn_blocking(move || {
+            let apps = platform.running_apps();
+            let mut icons = Vec::new();
+            let mut newly_looked_for = Vec::new();
+            for app in &apps {
+                if looked_for.insert(app.id.clone()) {
+                    newly_looked_for.push(app.id.clone());
+                    if let Some(png) = platform.app_icon(&app.id) {
+                        icons.push((app.id.clone(), png));
+                    }
+                }
+            }
+            let _ = events.send(Event::AppsRead {
+                apps,
+                icons,
+                looked_for: newly_looked_for,
+            });
+        });
+    }
+
+    fn on_apps_read(
+        &mut self,
+        apps: Vec<RunningApp>,
+        icons: Vec<(String, Vec<u8>)>,
+        looked_for: Vec<String>,
+    ) {
+        self.reading_apps = false;
+        self.icons_looked_for.extend(looked_for);
+        let new_icons = !icons.is_empty();
+        for (app, png) in icons {
+            if png.len() <= MAX_ICON_BYTES {
+                self.icon_urls
+                    .insert((self.me, app.clone()), icon_url(&png));
+                self.local_icons.insert(app, png);
+            }
+        }
+        if apps != self.local_apps || new_icons {
+            self.local_apps = apps;
+            self.tell_peers_about_apps();
+        }
+        self.notify();
+    }
+
+    /// What other devices get told is open here.
+    fn apps_for_peers(&self) -> Vec<RunningApp> {
+        let rules = &self.settings.rules;
+        if !self.settings.enabled || !rules.share_apps {
+            return Vec::new();
+        }
+        let mut apps = self.local_apps.clone();
+        if !rules.media_control {
+            for app in &mut apps {
+                app.media = None;
+            }
+        }
+        apps
+    }
+
+    fn tell_peers_about_apps(&mut self) {
+        let peers: Vec<Fingerprint> = self.sessions.keys().copied().collect();
+        for peer in peers {
+            self.tell_peer_about_apps(peer);
+        }
+    }
+
+    fn tell_peer_about_apps(&mut self, peer: Fingerprint) {
+        let apps = self.apps_for_peers();
+        let Some(session) = self
+            .sessions
+            .get_mut(&peer)
+            .filter(|session| session.up && session.features & FEATURE_APPS != 0)
+        else {
+            return;
+        };
+        for app in &apps {
+            if let Some(png) = self.local_icons.get(&app.id)
+                && session.icons_sent.insert(app.id.clone())
+            {
+                let _ = session.outgoing.send(Message::AppIcon {
+                    app: app.id.clone(),
+                    png: png.clone(),
+                });
+            }
+        }
+        let _ = session.outgoing.send(Message::Apps(apps));
+    }
+
+    fn on_peer_apps(&mut self, peer: Fingerprint, apps: Vec<RunningApp>) {
+        if !self.sessions.get(&peer).is_some_and(|session| session.up) {
+            return;
+        }
+        self.peer_apps.insert(peer, apps::tidied(apps));
+        self.notify();
+    }
+
+    fn on_peer_app_icon(&mut self, peer: Fingerprint, app: String, png: Vec<u8>) {
+        let has_room = self
+            .icon_urls
+            .keys()
+            .filter(|(device, _)| *device == peer)
+            .count()
+            < MAX_ICONS;
+        // It goes into the page as a picture, so it had better say what it is.
+        if !has_room
+            || png.len() > MAX_ICON_BYTES
+            || !png.starts_with(b"\x89PNG")
+            || !self.sessions.get(&peer).is_some_and(|session| session.up)
+        {
+            return;
+        }
+        let app = app.chars().take(apps::MAX_APP_TEXT).collect();
+        self.icon_urls.insert((peer, app), icon_url(&png));
+        self.notify();
+    }
+
+    fn send_media_command(&mut self, device: Fingerprint, app: String, command: MediaCommand) {
+        // A PC with sharing turned off has nothing to do with the others.
+        if device != self.me && !self.settings.enabled {
+            return;
+        }
+        tracing::info!(%device, app, ?command, "a media command");
+        if device == self.me {
+            self.run_media_command(app, command);
+        } else if let Some(session) = self
+            .sessions
+            .get(&device)
+            .filter(|session| session.up && session.features & FEATURE_MEDIA != 0)
+        {
+            let _ = session.outgoing.send(Message::Media { app, command });
+        }
+    }
+
+    fn on_media_requested(&mut self, peer: Fingerprint, app: String, command: MediaCommand) {
+        let is_player = self
+            .local_apps
+            .iter()
+            .any(|known| known.id == app && known.media.is_some());
+        if !self.settings.enabled || !self.settings.rules.media_control || !is_player {
+            tracing::info!(%peer, app, "refused a media command from another device");
+            return;
+        }
+        tracing::info!(%peer, app, ?command, "a media command from another device");
+        self.run_media_command(app, command);
+    }
+
+    /// This waits on the player, so it's done off to the side.
+    fn run_media_command(&self, app: String, command: MediaCommand) {
+        let platform = self.shared.platform.clone();
+        let events = self.events.clone();
+        tokio::task::spawn_blocking(move || {
+            if let Err(error) = platform.media_command(&app, command) {
+                tracing::warn!(%error, app, "a media command didn't work");
+            }
+            std::thread::sleep(MEDIA_SETTLES);
+            let _ = events.send(Event::RefreshApps);
+        });
+    }
+
+    fn apps_on(&self, device: Fingerprint, monitor: &Monitor) -> Vec<AppView> {
+        let apps = if device == self.me {
+            Some(&self.local_apps)
+        } else {
+            self.peer_apps.get(&device)
+        };
+        apps.into_iter()
+            .flatten()
+            .filter(|app| app.is_on(&monitor.id, monitor.primary))
+            .map(|app| AppView {
+                id: app.id.clone(),
+                name: app.name.clone(),
+                icon: self.icon_urls.get(&(device, app.id.clone())).cloned(),
+                minimized: app.minimized,
+                media: app.media,
+            })
+            .collect()
     }
 
     fn check_fullscreen(&mut self) {
@@ -1652,6 +1915,7 @@ impl<P: Platform> Engine<P> {
                 blobs: link.blobs(),
                 up: already_up,
                 features: 0,
+                icons_sent: HashSet::new(),
             },
         );
         tokio::spawn(session::run(
@@ -1727,6 +1991,7 @@ impl<P: Platform> Engine<P> {
             let _ = session.outgoing.send(Message::Layout(self.layout.clone()));
         }
         self.adopt_layout(layout);
+        self.tell_peer_about_apps(peer);
         self.rebuild();
     }
 
@@ -1752,6 +2017,8 @@ impl<P: Platform> Engine<P> {
         if self.controlled_by == Some(device) {
             self.controlled_by = None;
         }
+        self.peer_apps.remove(&device);
+        self.icon_urls.retain(|(owner, _), _| *owner != device);
     }
 
     fn broadcast(&self, message: &Message) {
@@ -2011,6 +2278,7 @@ impl<P: Platform> Engine<P> {
                     scale: screen.monitor.scale,
                     primary: screen.monitor.primary,
                     online: screen.online,
+                    apps: self.apps_on(screen.device, &screen.monitor),
                 })
                 .collect(),
             pairing: self.pairing.as_ref().map(|pairing| pairing.view.clone()),
@@ -2107,6 +2375,12 @@ impl<P: Platform> Engine<P> {
             });
         paired.chain(available).collect()
     }
+}
+
+/// A picture of an app, as the app's page can show it.
+fn icon_url(png: &[u8]) -> String {
+    let encoded = base64::engine::general_purpose::STANDARD.encode(png);
+    format!("data:image/png;base64,{encoded}")
 }
 
 /// Drops monitors that make no sense. All the layout geometry divides by their
