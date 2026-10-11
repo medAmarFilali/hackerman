@@ -119,6 +119,12 @@ pub trait Platform: Clone + Send + Sync + 'static {
     fn media_command(&self, _app: &str, _command: MediaCommand) -> Result<(), Error> {
         Err(Error::Unsupported)
     }
+
+    /// Other programs running here that share the keyboard and mouse too, which can get in
+    /// each other's way.
+    fn rival_programs(&self) -> Vec<String> {
+        Vec::new()
+    }
 }
 
 /// Where the content of files on the clipboard comes from when they're elsewhere.

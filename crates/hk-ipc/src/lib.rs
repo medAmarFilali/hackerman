@@ -123,6 +123,9 @@ pub struct UiState {
     pub layout_saved: bool,
     /// How many sets of screens have an arrangement saved.
     pub saved_layouts: usize,
+    /// Other programs running here that share the keyboard and mouse too, like "Input
+    /// Director". They can get in each other's way.
+    pub rival_programs: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -416,8 +419,10 @@ mod tests {
             incoming_files: None,
             layout_saved: true,
             saved_layouts: 3,
+            rival_programs: vec!["Input Director".into()],
         };
         let json = serde_json::to_value(&state).unwrap();
+        assert_eq!(json["rivalPrograms"][0], "Input Director");
         assert_eq!(json["rules"]["shareApps"], true);
         assert_eq!(json["rules"]["mediaControl"], true);
         assert_eq!(json["layoutSaved"], true);

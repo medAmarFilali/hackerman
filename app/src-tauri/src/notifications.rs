@@ -159,6 +159,7 @@ mod tests {
             incoming_files: None,
             layout_saved: true,
             saved_layouts: 1,
+            rival_programs: vec![],
         }
     }
 

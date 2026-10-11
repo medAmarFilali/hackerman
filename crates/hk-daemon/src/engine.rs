@@ -78,6 +78,8 @@ const FINISHED_TRANSFERS_KEPT: usize = 20;
 /// A device running another version keeps being refused, so don't try often. An
 /// update on either side is still noticed quickly enough.
 const INCOMPATIBLE_DIALS_EVERY_N_TICKS: u64 = 15;
+/// How often to look for other programs that share the keyboard and mouse.
+const RIVALS_CHECK_EVERY_N_TICKS: u64 = 30;
 /// A tick this late means the agent was held up, or the computer was asleep.
 const HELD_UP_AFTER: Duration = Duration::from_secs(5);
 /// How long a player takes to change what it says it's doing, after being asked to.
@@ -203,6 +205,8 @@ pub enum Event {
         icons: Vec<(String, Vec<u8>)>,
         /// Which apps have now had their pictures looked for.
         looked_for: Vec<String>,
+        /// Set if these were looked for this time.
+        rivals: Option<Vec<String>>,
     },
     /// It's worth looking again at what's open here.
     RefreshApps,
@@ -336,6 +340,8 @@ struct Engine<P: Platform> {
     peer_apps: BTreeMap<Fingerprint, Vec<RunningApp>>,
     /// Pictures of apps on every device, ready for the app to show.
     icon_urls: BTreeMap<AppOn, String>,
+    /// Other programs here that share the keyboard and mouse too.
+    rivals: Vec<String>,
     // These keep input capture and clipboard watching running.
     capture: Option<Capture>,
     _clipboard_watcher: Option<Capture>,
@@ -474,6 +480,7 @@ pub async fn run<P: Platform>(options: Options, platform: P) -> Result<()> {
         icons_looked_for: HashSet::new(),
         peer_apps: BTreeMap::new(),
         icon_urls: BTreeMap::new(),
+        rivals: Vec::new(),
         capture,
         _clipboard_watcher: clipboard_watcher,
     };
@@ -795,7 +802,8 @@ impl<P: Platform> Engine<P> {
                 apps,
                 icons,
                 looked_for,
-            } => self.on_apps_read(apps, icons, looked_for),
+                rivals,
+            } => self.on_apps_read(apps, icons, looked_for, rivals),
             Event::RefreshApps => self.read_apps(),
             Event::PeerApps { peer, apps } => self.on_peer_apps(peer, apps),
             Event::PeerAppIcon { peer, app, png } => self.on_peer_app_icon(peer, app, png),
@@ -980,6 +988,7 @@ impl<P: Platform> Engine<P> {
         let platform = self.shared.platform.clone();
         let events = self.events.clone();
         let mut looked_for = self.icons_looked_for.clone();
+        let check_rivals = self.ticks % RIVALS_CHECK_EVERY_N_TICKS == 1;
         tokio::task::spawn_blocking(move || {
             let apps = platform.running_apps();
             let mut icons = Vec::new();
@@ -996,6 +1005,7 @@ impl<P: Platform> Engine<P> {
                 apps,
                 icons,
                 looked_for: newly_looked_for,
+                rivals: check_rivals.then(|| platform.rival_programs()),
             });
         });
     }
@@ -1005,9 +1015,19 @@ impl<P: Platform> Engine<P> {
         apps: Vec<RunningApp>,
         icons: Vec<(String, Vec<u8>)>,
         looked_for: Vec<String>,
+        rivals: Option<Vec<String>>,
     ) {
         self.reading_apps = false;
         self.icons_looked_for.extend(looked_for);
+        if let Some(rivals) = rivals
+            && rivals != self.rivals
+        {
+            tracing::warn!(
+                ?rivals,
+                "other programs sharing the keyboard and mouse are running here"
+            );
+            self.rivals = rivals;
+        }
         let new_icons = !icons.is_empty();
         for (app, png) in icons {
             if png.len() <= MAX_ICON_BYTES {
@@ -2317,6 +2337,7 @@ impl<P: Platform> Engine<P> {
                 }),
             layout_saved: self.layout.is_saved_for(&self.device_monitors()),
             saved_layouts: self.layout.saved_count(),
+            rival_programs: self.rivals.clone(),
         }
     }
 

@@ -167,6 +167,11 @@ Use the left Alt key. AltGr stays free for typing characters such as @ and #.
 
 ### If the keyboard and mouse freeze
 
+Another program that shares a keyboard and mouse, such as Input Director, sits in the way of
+the same key presses. Two of them can hold each other up, so Hackerman says if it finds one
+running. Quit or uninstall the one you aren't using, on each computer. For Input Director that
+includes its service, which keeps running in the background.
+
 Clicking a Windows notification leaves the keyboard with nothing in front, until you click a
 window. That's Windows, and it happens without Hackerman too.
 

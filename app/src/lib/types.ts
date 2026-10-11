@@ -184,4 +184,6 @@ export interface UiState {
   layoutSaved: boolean;
   /** How many sets of screens have a layout saved. */
   savedLayouts: number;
+  /** Other programs running here that share the keyboard and mouse too. */
+  rivalPrograms: string[];
 }

@@ -4000,3 +4000,14 @@ async fn a_locked_pc_says_nothing_about_its_apps_and_cant_be_asked_to_do_anythin
     assert!(apps_on_screen(&b.state, a_id, "fake-0").is_empty());
     assert!(helper.platform.media_commands().is_empty());
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn other_programs_sharing_the_keyboard_and_mouse_are_pointed_out() {
+    let platform = FakePlatform::with_screens(1);
+    platform.set_rival_programs(vec!["Input Director".into()]);
+    let mut a = Device::start_with("alpha", platform).await;
+    a.wait_for("them pointed out", |s| {
+        s.rival_programs == ["Input Director"]
+    })
+    .await;
+}

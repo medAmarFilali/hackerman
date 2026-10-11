@@ -36,6 +36,7 @@ struct State {
     icons: Vec<(String, Vec<u8>)>,
     icons_asked_for: Vec<String>,
     media_commands: Vec<(String, MediaCommand)>,
+    rivals: Vec<String>,
 }
 
 type ClipboardWatcher = Box<dyn FnMut() + Send>;
@@ -207,6 +208,10 @@ impl FakePlatform {
         self.state().media_commands.clone()
     }
 
+    pub fn set_rival_programs(&self, rivals: Vec<String>) {
+        self.state().rivals = rivals;
+    }
+
     pub fn cursor_hidden(&self) -> bool {
         self.state().cursor_hidden
     }
@@ -318,5 +323,9 @@ impl Platform for FakePlatform {
     fn media_command(&self, app: &str, command: MediaCommand) -> Result<(), Error> {
         self.state().media_commands.push((app.to_string(), command));
         Ok(())
+    }
+
+    fn rival_programs(&self) -> Vec<String> {
+        self.state().rivals.clone()
     }
 }

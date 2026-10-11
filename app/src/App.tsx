@@ -32,6 +32,14 @@ export function App() {
               This PC can't send its keyboard and mouse to other PCs: {state.captureError}
             </Banner>
           )}
+          {state.rivalPrograms.length > 0 && (
+            <Banner>
+              {state.rivalPrograms.join(" and ")} {state.rivalPrograms.length === 1 ? "is" : "are"}{" "}
+              also running on this PC. Programs that share a keyboard and mouse can get in each
+              other's way, and the keyboard and mouse can freeze. Quit or uninstall the one you
+              aren't using.
+            </Banner>
+          )}
         </div>
         <Status state={state} />
         <main className="flex min-h-0 flex-col">

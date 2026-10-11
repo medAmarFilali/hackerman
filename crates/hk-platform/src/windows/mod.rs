@@ -9,6 +9,7 @@ mod hook;
 mod inject;
 mod keymap;
 mod media;
+mod rivals;
 pub mod session;
 mod virtual_files;
 
@@ -254,6 +255,10 @@ impl Platform for NativePlatform {
             Role::Agent => media::command(app, command),
             Role::Helper { .. } => Err(Error::Media("the screen is locked".to_string())),
         }
+    }
+
+    fn rival_programs(&self) -> Vec<String> {
+        rivals::running()
     }
 }
 

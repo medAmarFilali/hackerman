@@ -53,6 +53,7 @@ function stateWith(change: Partial<UiState> = {}): UiState {
     incomingFiles: null,
     layoutSaved: true,
     savedLayouts: 1,
+    rivalPrograms: [],
     ...change,
   };
 }
