@@ -2,6 +2,8 @@
 
 use serde::{Deserialize, Serialize};
 
+use crate::input::{KeyCode, optional_key_by_name};
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", default)]
 pub struct Rules {
@@ -33,6 +35,8 @@ pub struct Rules {
     pub share_apps: bool,
     /// Let other devices play, pause and skip what's playing here.
     pub media_control: bool,
+    /// Keyboard shortcuts for what's playing, here or on another device.
+    pub media_shortcuts: MediaShortcuts,
 }
 
 impl Default for Rules {
@@ -50,6 +54,54 @@ impl Default for Rules {
             notify_files: true,
             share_apps: true,
             media_control: true,
+            media_shortcuts: MediaShortcuts::default(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct MediaShortcuts {
+    pub enabled: bool,
+    pub play_pause: Shortcut,
+    pub back: Shortcut,
+    pub forward: Shortcut,
+}
+
+impl Default for MediaShortcuts {
+    /// Away from the arrow keys, which are Ctrl+Alt shortcuts of their own in VS Code.
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            play_pause: Shortcut::ctrl_alt(KeyCode::Space),
+            back: Shortcut::ctrl_alt(KeyCode::PageUp),
+            forward: Shortcut::ctrl_alt(KeyCode::PageDown),
+        }
+    }
+}
+
+/// A key and the modifiers held with it. With no key, it's turned off.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct Shortcut {
+    pub ctrl: bool,
+    pub alt: bool,
+    pub shift: bool,
+    pub meta: bool,
+    /// Which physical key, whatever the keyboard layout. A settings file has no way to
+    /// write "none", so one with no key is written as a shortcut without this.
+    #[serde(with = "optional_key_by_name", skip_serializing_if = "Option::is_none")]
+    pub key: Option<KeyCode>,
+}
+
+impl Shortcut {
+    const fn ctrl_alt(key: KeyCode) -> Self {
+        Self {
+            ctrl: true,
+            alt: true,
+            shift: false,
+            meta: false,
+            key: Some(key),
         }
     }
 }
@@ -113,6 +165,43 @@ mod tests {
         assert!(rules.notify_files);
         assert!(rules.share_apps);
         assert!(rules.media_control);
+        assert_eq!(rules.media_shortcuts, MediaShortcuts::default());
+    }
+
+    #[test]
+    fn a_media_shortcut_turned_off_stays_off_in_a_settings_file() {
+        let mut rules = Rules::default();
+        rules.media_shortcuts.back = Shortcut::default();
+        rules.media_shortcuts.forward = Shortcut {
+            shift: true,
+            key: Some(KeyCode::F13),
+            ..Shortcut::default()
+        };
+
+        let written = toml::to_string(&rules).unwrap();
+        let read: Rules = toml::from_str(&written).unwrap();
+        assert_eq!(read, rules, "{written}");
+        assert_eq!(read.media_shortcuts.back.key, None);
+    }
+
+    #[test]
+    fn the_app_sees_shortcuts_by_the_names_of_their_keys() {
+        let json = serde_json::to_value(MediaShortcuts::default()).unwrap();
+        assert_eq!(json["playPause"]["key"], "Space");
+        assert_eq!(json["playPause"]["ctrl"], true);
+        assert_eq!(json["forward"]["key"], "PageDown");
+
+        let read: Shortcut =
+            serde_json::from_str(r#"{"meta":true,"key":"MediaPlayPause"}"#).unwrap();
+        assert!(read.meta);
+        assert_eq!(read.key, Some(KeyCode::MediaPlayPause));
+    }
+
+    #[test]
+    fn a_key_this_version_has_never_heard_of_turns_the_shortcut_off() {
+        let read: Shortcut =
+            serde_json::from_str(r#"{"ctrl":true,"key":"KeyOfTheFuture"}"#).unwrap();
+        assert_eq!(read.key, None);
     }
 
     #[test]

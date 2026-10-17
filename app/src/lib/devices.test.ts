@@ -43,6 +43,12 @@ function stateWith(change: Partial<UiState> = {}): UiState {
       notifyFiles: true,
       shareApps: true,
       mediaControl: true,
+      mediaShortcuts: {
+        enabled: true,
+        playPause: { ctrl: true, alt: true, shift: false, meta: false, key: "Space" },
+        back: { ctrl: true, alt: true, shift: false, meta: false, key: "PageUp" },
+        forward: { ctrl: true, alt: true, shift: false, meta: false, key: "PageDown" },
+      },
     },
     enabled: true,
     locked: false,

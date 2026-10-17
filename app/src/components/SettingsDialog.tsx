@@ -10,6 +10,7 @@ import {
   Palette,
   Paperclip,
   Settings,
+  X,
   type LucideIcon,
 } from "lucide-react";
 import { useEffect, useId, useState } from "react";
@@ -29,13 +30,24 @@ import {
 import { Switch } from "@/components/ui/switch";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import { changeAppearance, useAppearance } from "@/lib/appearance";
+import {
+  NO_SHORTCUT,
+  USUAL_MEDIA_SHORTCUTS,
+  describeShortcut,
+  isModifierKey,
+  shortcutFromEvent,
+  shortcutProblem,
+  useKeyLabels,
+} from "@/lib/shortcuts";
 import { type ThemeChoice, chooseTheme, useTheme } from "@/lib/theme";
 import type {
   CrossModifier,
   LockScreenStatus,
+  MediaShortcuts,
   NameClash,
   ReceiveFiles,
   Rules,
+  Shortcut,
   UiState,
 } from "@/lib/types";
 import { cn } from "@/lib/utils";
@@ -676,7 +688,164 @@ function Shortcuts({
           <dd className="text-muted-foreground">Come back to this PC, whatever is happening</dd>
         </dl>
       </div>
+      <SwitchRow
+        label="Media shortcuts"
+        description="These work from this PC's keyboard, wherever the cursor is, on whatever is playing on any of your PCs. If several are, it's the one that started last."
+        checked={state.rules.mediaShortcuts.enabled}
+        onChange={(enabled) =>
+          update({ mediaShortcuts: { ...state.rules.mediaShortcuts, enabled } })
+        }
+      />
+      <MediaShortcutRows shortcuts={state.rules.mediaShortcuts} update={update} />
     </>
+  );
+}
+
+const MEDIA_SHORTCUT_ROWS: { field: keyof Omit<MediaShortcuts, "enabled">; label: string }[] = [
+  { field: "playPause", label: "Play or pause" },
+  { field: "back", label: "Back" },
+  { field: "forward", label: "Forward" },
+];
+
+function MediaShortcutRows({
+  shortcuts,
+  update,
+}: {
+  shortcuts: MediaShortcuts;
+  update: (change: Partial<Rules>) => void;
+}) {
+  const others = (field: string) =>
+    MEDIA_SHORTCUT_ROWS.filter((row) => row.field !== field).map((row) => shortcuts[row.field]);
+  const isUsual = MEDIA_SHORTCUT_ROWS.every(
+    ({ field }) => describeShortcut(shortcuts[field]) === describeShortcut(USUAL_MEDIA_SHORTCUTS[field]),
+  );
+  return (
+    <div className={cn("flex flex-col gap-2", !shortcuts.enabled && "opacity-50")}>
+      {MEDIA_SHORTCUT_ROWS.map(({ field, label }) => (
+        <ShortcutRow
+          key={field}
+          label={label}
+          shortcut={shortcuts[field]}
+          others={others(field)}
+          disabled={!shortcuts.enabled}
+          onChange={(shortcut) =>
+            update({ mediaShortcuts: { ...shortcuts, [field]: shortcut } })
+          }
+        />
+      ))}
+      {!isUsual && (
+        <div>
+          <Button
+            size="xs"
+            variant="ghost"
+            disabled={!shortcuts.enabled}
+            onClick={() =>
+              update({ mediaShortcuts: { enabled: shortcuts.enabled, ...USUAL_MEDIA_SHORTCUTS } })
+            }
+          >
+            Put back the usual ones
+          </Button>
+        </div>
+      )}
+    </div>
+  );
+}
+
+/** Shows a shortcut. Pressing the button waits for the next keys pressed, and they're the new one. */
+function ShortcutRow({
+  label,
+  shortcut,
+  others,
+  disabled,
+  onChange,
+}: {
+  label: string;
+  shortcut: Shortcut;
+  others: Shortcut[];
+  disabled: boolean;
+  onChange: (shortcut: Shortcut) => void;
+}) {
+  const [recording, setRecording] = useState(false);
+  const [problem, setProblem] = useState<string | null>(null);
+  const labels = useKeyLabels();
+
+  // In the dependencies, these would stop and start it on every state from the agent.
+  const othersKey = JSON.stringify(others);
+  useEffect(() => {
+    if (!recording) return;
+    // The agent leaves shortcuts alone for now, or it'd act on them before this saw them.
+    send({ type: "recordingShortcut", active: true });
+    function onKey(event: KeyboardEvent) {
+      event.preventDefault();
+      event.stopPropagation();
+      if (event.code === "Escape") {
+        setProblem(null);
+        setRecording(false);
+        return;
+      }
+      if (isModifierKey(event.code)) return;
+      const pressed = shortcutFromEvent(event);
+      const wrong = event.getModifierState("AltGraph")
+        ? "AltGr is for typing characters. Use the left Alt key."
+        : shortcutProblem(pressed, JSON.parse(othersKey) as Shortcut[]);
+      setProblem(wrong);
+      if (!wrong) {
+        onChange(pressed);
+        setRecording(false);
+      }
+    }
+    window.addEventListener("keydown", onKey, true);
+    return () => {
+      window.removeEventListener("keydown", onKey, true);
+      send({ type: "recordingShortcut", active: false });
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [recording, othersKey]);
+
+  return (
+    <div className="flex flex-col gap-1">
+      <div className="flex items-center justify-between gap-3">
+        <span className="text-xs">{label}</span>
+        <div className="flex items-center gap-1">
+          <Button
+            size="xs"
+            variant="outline"
+            disabled={disabled}
+            aria-pressed={recording}
+            aria-label={`Change the shortcut for ${label}: now ${describeShortcut(shortcut, labels)}`}
+            onClick={() => {
+              setProblem(null);
+              setRecording(!recording);
+            }}
+            className={cn("min-w-32 font-mono", recording && "border-signal text-signal")}
+          >
+            {recording ? "Press the keys…" : describeShortcut(shortcut, labels)}
+          </Button>
+          <Button
+            size="icon-xs"
+            variant="ghost"
+            disabled={disabled || !shortcut.key}
+            title="Turn this one off"
+            aria-label={`Turn off the shortcut for ${label}`}
+            onClick={() => {
+              setRecording(false);
+              setProblem(null);
+              onChange(NO_SHORTCUT);
+            }}
+          >
+            <X />
+          </Button>
+        </div>
+      </div>
+      {recording && !problem && (
+        <p className="text-right text-xs text-muted-foreground">Esc to stop without changing it.</p>
+      )}
+      {problem && (
+        <p role="alert" className="text-right text-xs text-amber-700 dark:text-amber-400">
+          {problem}
+        </p>
+      )}
+    </div>
   );
 }
 

@@ -28,9 +28,27 @@ export type Request =
   | { type: "answerIncomingFiles"; id: string; accept: boolean; always?: boolean }
   | { type: "setFilesAllowed"; device: Fingerprint; allowed: boolean }
   | { type: "mediaCommand"; device: Fingerprint; app: string; command: MediaCommand }
+  | { type: "recordingShortcut"; active: boolean }
   | { type: "shutdown" };
 
 export type MediaCommand = "playPause" | "back" | "forward";
+
+/** A key and the modifiers held with it. With no key, it's turned off. */
+export interface Shortcut {
+  ctrl: boolean;
+  alt: boolean;
+  shift: boolean;
+  meta: boolean;
+  /** Which physical key, like "Space" or "KeyQ". */
+  key?: string | null;
+}
+
+export interface MediaShortcuts {
+  enabled: boolean;
+  playPause: Shortcut;
+  back: Shortcut;
+  forward: Shortcut;
+}
 
 export type CrossModifier = "none" | "ctrl" | "shift" | "alt";
 export type ReceiveFiles = "askFirst" | "anyDevice" | "ask" | "never";
@@ -52,6 +70,7 @@ export interface Rules {
   shareApps: boolean;
   /** Let other PCs play, pause and skip what's playing here. */
   mediaControl: boolean;
+  mediaShortcuts: MediaShortcuts;
 }
 
 /** Whether this PC is set up to work at the lock screen. */

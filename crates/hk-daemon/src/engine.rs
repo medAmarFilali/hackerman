@@ -225,6 +225,8 @@ pub enum Event {
         app: String,
         command: MediaCommand,
     },
+    /// A media shortcut was pressed on this device's keyboard.
+    MediaShortcut(MediaCommand),
     PairingStage {
         peer_name: Option<String>,
         stage: PairingStage,
@@ -340,6 +342,11 @@ struct Engine<P: Platform> {
     peer_apps: BTreeMap<Fingerprint, Vec<RunningApp>>,
     /// Pictures of apps on every device, ready for the app to show.
     icon_urls: BTreeMap<AppOn, String>,
+    /// What's playing anywhere, and since when it was noticed.
+    playing_since: BTreeMap<AppOn, Instant>,
+    /// What was last played, paused or skipped from here. Pausing something leaves nothing
+    /// playing, and the same shortcut should start it again.
+    last_media_target: Option<AppOn>,
     /// Other programs here that share the keyboard and mouse too.
     rivals: Vec<String>,
     // These keep input capture and clipboard watching running.
@@ -480,6 +487,8 @@ pub async fn run<P: Platform>(options: Options, platform: P) -> Result<()> {
         icons_looked_for: HashSet::new(),
         peer_apps: BTreeMap::new(),
         icon_urls: BTreeMap::new(),
+        playing_since: BTreeMap::new(),
+        last_media_target: None,
         rivals: Vec::new(),
         capture,
         _clipboard_watcher: clipboard_watcher,
@@ -699,6 +708,8 @@ impl<P: Platform> Engine<P> {
             Event::AppConnected(state) => {
                 let _ = state.send(self.ui_state());
                 self.apps.push(state);
+                // An app that stopped in the middle of choosing one would leave them off.
+                self.shared.switcher().set_shortcuts_paused(false);
             }
             Event::AppRequest(request) => self.on_request(request),
             Event::Discovery(DiscoveryEvent::Found(found)) => {
@@ -810,6 +821,11 @@ impl<P: Platform> Engine<P> {
             Event::MediaRequested { peer, app, command } => {
                 self.on_media_requested(peer, app, command);
             }
+            Event::MediaShortcut(command) => {
+                if let Some((device, app)) = self.media_target() {
+                    self.send_media_command(device, app, command);
+                }
+            }
             Event::PairingStage { peer_name, stage } => {
                 if let Some(pairing) = &mut self.pairing {
                     pairing.view = PairingView { peer_name, stage };
@@ -883,6 +899,9 @@ impl<P: Platform> Engine<P> {
                 app,
                 command,
             } => self.send_media_command(device, app, command),
+            Request::RecordingShortcut { active } => {
+                self.shared.switcher().set_shortcuts_paused(active);
+            }
             Request::Shutdown => {} // Handled by the main loop.
         }
     }
@@ -1038,6 +1057,7 @@ impl<P: Platform> Engine<P> {
         }
         if apps != self.local_apps || new_icons {
             self.local_apps = apps;
+            self.media_changed();
             self.tell_peers_about_apps();
         }
         self.notify();
@@ -1092,6 +1112,7 @@ impl<P: Platform> Engine<P> {
             return;
         }
         self.peer_apps.insert(peer, apps::tidied(apps));
+        self.media_changed();
         self.notify();
     }
 
@@ -1115,12 +1136,59 @@ impl<P: Platform> Engine<P> {
         self.notify();
     }
 
+    /// Every app on every device that can be played and paused, starting with this device's.
+    fn media_apps(&self) -> impl Iterator<Item = (Fingerprint, &RunningApp)> {
+        let here = self.local_apps.iter().map(|app| (self.me, app));
+        let there = self
+            .peer_apps
+            .iter()
+            .flat_map(|(&device, apps)| apps.iter().map(move |app| (device, app)));
+        here.chain(there).filter(|(_, app)| app.media.is_some())
+    }
+
+    /// Keeps track of what started playing when, and of whether there's anything for a media
+    /// shortcut to do.
+    fn media_changed(&mut self) {
+        let playing: Vec<AppOn> = self
+            .media_apps()
+            .filter(|(_, app)| app.media.is_some_and(|media| media.playing == Some(true)))
+            .map(|(device, app)| (device, app.id.clone()))
+            .collect();
+        self.playing_since.retain(|key, _| playing.contains(key));
+        for key in playing {
+            self.playing_since.entry(key).or_insert_with(Instant::now);
+        }
+        let available = self.media_apps().next().is_some();
+        self.shared.switcher().set_media_available(available);
+    }
+
+    /// What a media shortcut is for: whatever started playing last. With nothing playing, what
+    /// the last command was for, so that the shortcut that paused something starts it again.
+    /// Failing that, a player that doesn't say what it's doing, since it may well be playing.
+    fn media_target(&self) -> Option<AppOn> {
+        if let Some((key, _)) = self.playing_since.iter().max_by_key(|(_, since)| **since) {
+            return Some(key.clone());
+        }
+        if let Some(last) = &self.last_media_target
+            && self
+                .media_apps()
+                .any(|(device, app)| device == last.0 && app.id == last.1)
+        {
+            return Some(last.clone());
+        }
+        self.media_apps()
+            .find(|(_, app)| app.media.is_some_and(|media| media.playing.is_none()))
+            .or_else(|| self.media_apps().next())
+            .map(|(device, app)| (device, app.id.clone()))
+    }
+
     fn send_media_command(&mut self, device: Fingerprint, app: String, command: MediaCommand) {
         // A PC with sharing turned off has nothing to do with the others.
         if device != self.me && !self.settings.enabled {
             return;
         }
         tracing::info!(%device, app, ?command, "a media command");
+        self.last_media_target = Some((device, app.clone()));
         if device == self.me {
             self.run_media_command(app, command);
         } else if let Some(session) = self
@@ -2039,6 +2107,7 @@ impl<P: Platform> Engine<P> {
         }
         self.peer_apps.remove(&device);
         self.icon_urls.retain(|(owner, _), _| *owner != device);
+        self.media_changed();
     }
 
     fn broadcast(&self, message: &Message) {

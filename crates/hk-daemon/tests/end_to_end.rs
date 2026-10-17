@@ -14,7 +14,7 @@ use hk_core::device::Fingerprint;
 use hk_core::geometry::{Point, Rect};
 use hk_core::input::{InputEvent, KeyCode};
 use hk_core::layout::{LayoutDoc, Monitor, Placement};
-use hk_core::rules::{CrossModifier, NameClash, ReceiveFiles, Rules};
+use hk_core::rules::{CrossModifier, NameClash, ReceiveFiles, Rules, Shortcut};
 use hk_core::switcher::LocalEvent;
 use hk_daemon::{Options, lock_screen, run};
 use hk_ipc::{
@@ -3540,6 +3540,17 @@ async fn wait_for_media_command(device: &Device, app: &str, command: MediaComman
         });
 }
 
+/// Holds Ctrl and the left Alt on this device's keyboard, and presses a key.
+fn press_with_ctrl_alt(device: &Device, code: KeyCode) -> bool {
+    device.press(KeyCode::ControlLeft, true);
+    device.press(KeyCode::AltLeft, true);
+    let hidden = device.press(code, true);
+    device.press(code, false);
+    device.press(KeyCode::AltLeft, false);
+    device.press(KeyCode::ControlLeft, false);
+    hidden
+}
+
 /// An agent paired with a device that isn't there, for a test to play the part of.
 async fn with_a_paired_device_to_play(name: &str) -> (Device, Identity, Fingerprint) {
     let identity = Identity::generate().unwrap();
@@ -3962,6 +3973,177 @@ async fn another_pc_cant_send_commands_to_just_anything() {
     assert!(b.platform.media_commands().is_empty());
 }
 
+/// A shortcut for what's playing on whichever PC that is.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_media_shortcut_reaches_whatever_is_playing_on_another_pc() {
+    let (mut a, b) = side_by_side().await;
+    let b_id = b.fingerprint();
+    b.platform
+        .set_running_apps(vec![player("spotify", Some(true))]);
+    a.wait_for("the player", |s| shows_playing(s, b_id, "spotify", true))
+        .await;
+
+    assert!(
+        press_with_ctrl_alt(&a, KeyCode::Space),
+        "it's hidden from this PC"
+    );
+    wait_for_media_command(&b, "spotify", MediaCommand::PlayPause).await;
+    assert!(press_with_ctrl_alt(&a, KeyCode::PageDown));
+    wait_for_media_command(&b, "spotify", MediaCommand::Forward).await;
+    assert!(press_with_ctrl_alt(&a, KeyCode::PageUp));
+    wait_for_media_command(&b, "spotify", MediaCommand::Back).await;
+    assert!(a.platform.media_commands().is_empty());
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn with_nothing_to_play_a_media_shortcut_stays_with_the_program_in_front() {
+    let (a, b) = side_by_side().await;
+    b.platform
+        .set_running_apps(vec![window_of("notepad", "Notepad", &["fake-0"])]);
+    tokio::time::sleep(TICK_AND_A_BIT).await;
+    assert!(!press_with_ctrl_alt(&a, KeyCode::Space));
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn media_shortcuts_can_be_chosen_and_turned_off() {
+    let (mut a, b) = side_by_side().await;
+    let b_id = b.fingerprint();
+    b.platform
+        .set_running_apps(vec![player("spotify", Some(true))]);
+    a.wait_for("the player", |s| shows_playing(s, b_id, "spotify", true))
+        .await;
+
+    let mut rules = Rules::default();
+    rules.media_shortcuts.play_pause = Shortcut {
+        key: Some(KeyCode::F13),
+        ..Shortcut::default()
+    };
+    a.request(Request::SetRules {
+        rules: rules.clone(),
+    })
+    .await;
+    a.wait_for("the rules", |s| s.rules == rules).await;
+
+    assert!(!press_with_ctrl_alt(&a, KeyCode::Space), "not any more");
+    assert!(a.press(KeyCode::F13, true));
+    a.press(KeyCode::F13, false);
+    wait_for_media_command(&b, "spotify", MediaCommand::PlayPause).await;
+
+    rules.media_shortcuts.enabled = false;
+    a.request(Request::SetRules {
+        rules: rules.clone(),
+    })
+    .await;
+    a.wait_for("the rules", |s| s.rules == rules).await;
+    assert!(!a.press(KeyCode::F13, true));
+}
+
+/// Pausing leaves nothing playing, and the same shortcut has to start it again.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_media_shortcut_goes_to_what_started_last_then_to_what_it_last_paused() {
+    let (mut a, b) = side_by_side().await;
+    let (a_id, b_id) = (a.fingerprint(), b.fingerprint());
+    let command_count = |device: &Device, app: &str| {
+        device
+            .platform
+            .media_commands()
+            .iter()
+            .filter(|(id, _)| id == app)
+            .count()
+    };
+
+    // Something's paused here, and something starts playing on the other PC.
+    a.platform
+        .set_running_apps(vec![player("msedge", Some(false))]);
+    b.platform
+        .set_running_apps(vec![player("spotify", Some(true))]);
+    a.wait_for("both", |s| {
+        shows_playing(s, a_id, "msedge", false) && shows_playing(s, b_id, "spotify", true)
+    })
+    .await;
+    assert!(press_with_ctrl_alt(&a, KeyCode::Space));
+    wait_for_media_command(&b, "spotify", MediaCommand::PlayPause).await;
+    assert_eq!(command_count(&a, "msedge"), 0);
+
+    // It pauses, leaving nothing playing anywhere: the next press starts it again, rather
+    // than starting what's paused here.
+    b.platform
+        .set_running_apps(vec![player("spotify", Some(false))]);
+    a.wait_for("paused", |s| shows_playing(s, b_id, "spotify", false))
+        .await;
+    assert!(press_with_ctrl_alt(&a, KeyCode::Space));
+    let wait = async {
+        while command_count(&b, "spotify") < 2 {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    };
+    tokio::time::timeout(TIMEOUT, wait).await.unwrap();
+    assert_eq!(command_count(&a, "msedge"), 0);
+
+    // Then something starts here too, later than the other. That's what it's for now.
+    b.platform
+        .set_running_apps(vec![player("spotify", Some(true))]);
+    a.wait_for("playing again", |s| shows_playing(s, b_id, "spotify", true))
+        .await;
+    a.platform
+        .set_running_apps(vec![player("msedge", Some(true))]);
+    a.wait_for("both playing", |s| {
+        shows_playing(s, a_id, "msedge", true) && shows_playing(s, b_id, "spotify", true)
+    })
+    .await;
+    assert!(press_with_ctrl_alt(&a, KeyCode::Space));
+    wait_for_media_command(&a, "msedge", MediaCommand::PlayPause).await;
+    assert_eq!(command_count(&b, "spotify"), 2);
+}
+
+/// Stremio doesn't say whether it's playing, so it's the best guess with nothing else to go on.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_player_that_doesnt_say_comes_before_something_known_to_be_paused() {
+    let (mut a, b) = side_by_side().await;
+    let (a_id, b_id) = (a.fingerprint(), b.fingerprint());
+    a.platform
+        .set_running_apps(vec![player("msedge", Some(false))]);
+    b.platform.set_running_apps(vec![player("stremio", None)]);
+    a.wait_for("both", |s| {
+        shows_playing(s, a_id, "msedge", false) && apps_on_screen(s, b_id, "fake-0") == ["stremio"]
+    })
+    .await;
+    assert!(press_with_ctrl_alt(&a, KeyCode::Space));
+    wait_for_media_command(&b, "stremio", MediaCommand::PlayPause).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_media_shortcut_leaves_the_cursor_where_it_is() {
+    let (mut a, b) = side_by_side().await;
+    let (a_id, b_id) = (a.fingerprint(), b.fingerprint());
+    a.platform
+        .set_running_apps(vec![player("spotify", Some(true))]);
+    a.wait_for("the player", |s| shows_playing(s, a_id, "spotify", true))
+        .await;
+    a.move_mouse(100.0, 100.0);
+    assert!(a.move_mouse(1919.0, 500.0));
+    a.wait_for("on the other PC", |s| {
+        s.control == ControlView::Controlling { device: b_id }
+    })
+    .await;
+
+    assert!(press_with_ctrl_alt(&a, KeyCode::Space));
+    wait_for_media_command(&a, "spotify", MediaCommand::PlayPause).await;
+    assert_eq!(
+        a.state.control,
+        ControlView::Controlling { device: b_id },
+        "it stays there"
+    );
+    // The other PC saw Ctrl and Alt go down and up, but not the key between them.
+    assert!(!b.platform.injected().iter().any(|event| matches!(
+        event,
+        InputEvent::Key {
+            code: KeyCode::Space,
+            ..
+        }
+    )));
+}
+
 /// A locked PC says nothing about what's open, and isn't to be controlled.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_locked_pc_says_nothing_about_its_apps_and_cant_be_asked_to_do_anything() {
@@ -4010,4 +4192,27 @@ async fn other_programs_sharing_the_keyboard_and_mouse_are_pointed_out() {
         s.rival_programs == ["Input Director"]
     })
     .await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn shortcuts_do_nothing_while_a_new_one_is_being_chosen() {
+    let (mut a, b) = side_by_side().await;
+    let b_id = b.fingerprint();
+    b.platform
+        .set_running_apps(vec![player("spotify", Some(true))]);
+    a.wait_for("the player", |s| shows_playing(s, b_id, "spotify", true))
+        .await;
+
+    a.request(Request::RecordingShortcut { active: true }).await;
+    let_things_settle().await;
+    assert!(!press_with_ctrl_alt(&a, KeyCode::Space));
+    assert!(!press_with_ctrl_alt(&a, KeyCode::Digit2));
+    assert_eq!(a.state.control, ControlView::Home);
+    assert!(b.platform.media_commands().is_empty());
+
+    a.request(Request::RecordingShortcut { active: false })
+        .await;
+    let_things_settle().await;
+    assert!(press_with_ctrl_alt(&a, KeyCode::Space));
+    wait_for_media_command(&b, "spotify", MediaCommand::PlayPause).await;
 }

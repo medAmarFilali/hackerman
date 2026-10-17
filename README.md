@@ -162,8 +162,17 @@ computer does neither. All your computers need this version for any of this.
 | **Ctrl+Alt+1** | Jump to this computer |
 | **Ctrl+Alt+2** and up | Jump to a paired computer, as listed in **Settings** |
 | **Ctrl+Alt+Home** | Come back to this computer, whatever is happening |
+| **Ctrl+Alt+Space** | Play or pause |
+| **Ctrl+Alt+Page Up** | Back |
+| **Ctrl+Alt+Page Down** | Forward |
 
 Use the left Alt key. AltGr stays free for typing characters such as @ and #.
+
+The last three can be changed or turned off in **Settings > Shortcuts**, on the computer whose
+keyboard you're using. They work wherever the cursor is, on whatever is playing on any of your
+computers. If several things are playing, that's the one that started last. With nothing
+playing, it's whatever they were last used on, so the shortcut that paused something starts it
+again. With nothing that can be played anywhere, those keys go to the program in front as usual.
 
 ### If the keyboard and mouse freeze
 

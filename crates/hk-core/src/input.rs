@@ -121,6 +121,30 @@ mod key_code_by_name {
     }
 }
 
+/// The same for a key that may not have been chosen. One this version doesn't know of
+/// counts as not chosen, since it could never be pressed.
+pub(crate) mod optional_key_by_name {
+    use super::KeyCode;
+    use serde::{Deserialize, Deserializer, Serializer};
+
+    pub fn serialize<S: Serializer>(
+        code: &Option<KeyCode>,
+        serializer: S,
+    ) -> Result<S::Ok, S::Error> {
+        match code {
+            Some(code) => serializer.collect_str(code),
+            None => serializer.serialize_none(),
+        }
+    }
+
+    pub fn deserialize<'de, D: Deserializer<'de>>(
+        deserializer: D,
+    ) -> Result<Option<KeyCode>, D::Error> {
+        let name = Option::<String>::deserialize(deserializer)?;
+        Ok(name.and_then(|name| name.parse().ok()))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

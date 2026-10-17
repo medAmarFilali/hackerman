@@ -17,7 +17,7 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
 use hk_core::device::Fingerprint;
-use hk_core::rules::{ReceiveFiles, Rules};
+use hk_core::rules::{MediaShortcuts, ReceiveFiles, Rules};
 use serde::Deserialize;
 
 use crate::config::{DEFAULT_PORT, PairedDevice, Settings, computer_name, write_atomically};
@@ -54,6 +54,10 @@ fn rules_while_locked() -> Rules {
         notify_files: false,
         share_apps: false,
         media_control: false,
+        media_shortcuts: MediaShortcuts {
+            enabled: false,
+            ..MediaShortcuts::default()
+        },
         ..Rules::default()
     }
 }
@@ -308,6 +312,7 @@ mod tests {
         assert!(!rules.notify_files);
         assert!(!rules.share_apps);
         assert!(!rules.media_control);
+        assert!(!rules.media_shortcuts.enabled);
         assert_eq!(rules.receive_files, ReceiveFiles::Never);
         assert_eq!(rules.drop_folder, None);
         assert_eq!(rules.cross_modifier, CrossModifier::None);

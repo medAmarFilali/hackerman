@@ -89,6 +89,11 @@ pub enum Request {
         app: String,
         command: MediaCommand,
     },
+    /// The user is choosing a new shortcut, or has stopped. Until then, shortcuts here do
+    /// nothing, so that the app can see what's pressed.
+    RecordingShortcut {
+        active: bool,
+    },
     /// Stop the agent.
     Shutdown,
 }
@@ -425,6 +430,7 @@ mod tests {
         assert_eq!(json["rivalPrograms"][0], "Input Director");
         assert_eq!(json["rules"]["shareApps"], true);
         assert_eq!(json["rules"]["mediaControl"], true);
+        assert_eq!(json["rules"]["mediaShortcuts"]["playPause"]["key"], "Space");
         assert_eq!(json["layoutSaved"], true);
         assert_eq!(json["savedLayouts"], 3);
         assert_eq!(json["devices"][0]["filesAllowed"], true);

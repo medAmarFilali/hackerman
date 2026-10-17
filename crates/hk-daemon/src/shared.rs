@@ -115,6 +115,9 @@ impl<P: Platform> Shared<P> {
                 Action::StateChanged => {
                     let _ = self.events.send(Event::ControlChanged);
                 }
+                Action::Media(command) => {
+                    let _ = self.events.send(Event::MediaShortcut(command));
+                }
             }
         }
     }

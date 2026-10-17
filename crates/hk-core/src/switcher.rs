@@ -18,11 +18,12 @@
 use std::collections::HashSet;
 use std::time::Duration;
 
+use crate::apps::MediaCommand;
 use crate::device::Fingerprint;
 use crate::geometry::{Point, Rect};
 use crate::input::{InputEvent, KeyCode, MouseButton};
 use crate::layout::{Crossing, Side, Topology, clamp_to_pixels};
-use crate::rules::{CrossModifier, Rules};
+use crate::rules::{CrossModifier, Rules, Shortcut};
 
 /// How far from where it was parked the cursor has to be for something to have moved it.
 /// Nearer than this can be a single report from the mouse.
@@ -66,6 +67,8 @@ pub enum Action {
     RestoreCursor(Point),
     /// Something the user should be able to see has changed.
     StateChanged,
+    /// A media shortcut was pressed. It's for whatever is playing, wherever that is.
+    Media(MediaCommand),
 }
 
 #[derive(Debug, Default, PartialEq)]
@@ -122,6 +125,11 @@ pub struct Switcher {
     edge_contact: Option<(Side, Duration)>,
     /// What the Ctrl+Alt+number shortcuts lead to: the first is number 1.
     jump_order: Vec<Fingerprint>,
+    /// Something somewhere can be played or paused. If nothing can, media shortcuts stay
+    /// with the program in front, which may have a use for those keys.
+    media_available: bool,
+    /// The user is choosing a new shortcut, so the keys are for the window asking.
+    shortcuts_paused: bool,
     now: Duration,
 }
 
@@ -147,6 +155,8 @@ impl Switcher {
             fullscreen: false,
             edge_contact: None,
             jump_order: Vec::new(),
+            media_available: false,
+            shortcuts_paused: false,
             now: Duration::ZERO,
         }
     }
@@ -170,6 +180,17 @@ impl Switcher {
 
     pub fn set_jump_order(&mut self, order: Vec<Fingerprint>) {
         self.jump_order = order;
+    }
+
+    /// Says whether anything on any device can be played or paused.
+    pub fn set_media_available(&mut self, available: bool) {
+        self.media_available = available;
+    }
+
+    /// Leaves every shortcut alone while the user is choosing a new one. Ctrl+Alt+Home isn't
+    /// one of these: it's the way back from anything.
+    pub fn set_shortcuts_paused(&mut self, paused: bool) {
+        self.shortcuts_paused = paused;
     }
 
     /// Says whether a full-screen app is in front on this machine.
@@ -245,25 +266,59 @@ impl Switcher {
         if self.shortcut_keys.contains(&code) {
             return Some(Outcome::swallow(vec![]));
         }
+        if self.shortcuts_paused {
+            return None;
+        }
         let held = |code| self.local_keys.contains(&code) || self.remote_keys.contains(&code);
         let modifiers =
             (held(KeyCode::ControlLeft) || held(KeyCode::ControlRight)) && held(KeyCode::AltLeft);
-        if !self.rules.shortcuts || !modifiers {
+        if self.rules.shortcuts && modifiers {
+            if code == KeyCode::KeyL {
+                self.shortcut_keys.insert(code);
+                self.locked = !self.locked;
+                return Some(Outcome::swallow(vec![Action::StateChanged]));
+            }
+            if let Some(index) = jump_index(code) {
+                self.shortcut_keys.insert(code);
+                let actions = match self.jump_order.get(index).copied() {
+                    Some(device) => self.jump_to(device),
+                    None => vec![],
+                };
+                return Some(Outcome::swallow(actions));
+            }
+        }
+        let command = self.media_shortcut(code)?;
+        self.shortcut_keys.insert(code);
+        Some(Outcome::swallow(vec![Action::Media(command)]))
+    }
+
+    /// Which media shortcut this key completes, if any. It has to be just those modifiers,
+    /// so that a shortcut on Ctrl+Space doesn't also take Ctrl+Shift+Space. As above, AltGr
+    /// doesn't count as anything: Windows reports it as Ctrl + right Alt.
+    fn media_shortcut(&self, code: KeyCode) -> Option<MediaCommand> {
+        let shortcuts = &self.rules.media_shortcuts;
+        if !shortcuts.enabled || !self.media_available {
             return None;
         }
-
-        if code == KeyCode::KeyL {
-            self.shortcut_keys.insert(code);
-            self.locked = !self.locked;
-            return Some(Outcome::swallow(vec![Action::StateChanged]));
+        let held = |code| self.local_keys.contains(&code) || self.remote_keys.contains(&code);
+        let ctrl = held(KeyCode::ControlLeft) || held(KeyCode::ControlRight);
+        if ctrl && held(KeyCode::AltRight) {
+            return None;
         }
-        let index = jump_index(code)?;
-        self.shortcut_keys.insert(code);
-        let actions = match self.jump_order.get(index).copied() {
-            Some(device) => self.jump_to(device),
-            None => vec![],
+        let pressed = Shortcut {
+            ctrl,
+            alt: held(KeyCode::AltLeft) || held(KeyCode::AltRight),
+            shift: held(KeyCode::ShiftLeft) || held(KeyCode::ShiftRight),
+            meta: held(KeyCode::MetaLeft) || held(KeyCode::MetaRight),
+            key: Some(code),
         };
-        Some(Outcome::swallow(actions))
+        [
+            (shortcuts.play_pause, MediaCommand::PlayPause),
+            (shortcuts.back, MediaCommand::Back),
+            (shortcuts.forward, MediaCommand::Forward),
+        ]
+        .into_iter()
+        .find_map(|(shortcut, command)| (shortcut == pressed).then_some(command))
     }
 
     /// Moves control straight to the middle of `device`'s main monitor. A
@@ -824,6 +879,179 @@ mod tests {
         let mut s = peer_on_the_right();
         s.local(motion(1919.0, 540.0));
         assert_eq!(s.local(nudge(120.0, 0.0)).actions, [at(PEER, 120.0, 540.0)]);
+    }
+
+    const PLAY: KeyCode = KeyCode::Space;
+
+    /// With something to play, and the default shortcuts.
+    fn with_media() -> Switcher {
+        let mut s = peer_on_the_right();
+        s.set_media_available(true);
+        s
+    }
+
+    fn press_all(s: &mut Switcher, keys: &[KeyCode]) {
+        for &code in keys {
+            s.local(key(code, true));
+        }
+    }
+
+    #[test]
+    fn a_media_shortcut_is_hidden_and_reported() {
+        let mut s = with_media();
+        press_all(&mut s, &[KeyCode::ControlLeft, KeyCode::AltLeft]);
+        assert_eq!(
+            s.local(key(PLAY, true)),
+            Outcome::swallow(vec![Action::Media(MediaCommand::PlayPause)])
+        );
+        // Holding it down doesn't start and stop the music over and over.
+        assert_eq!(s.local(key(PLAY, true)), Outcome::swallow(vec![]));
+        assert_eq!(s.local(key(PLAY, false)), Outcome::swallow(vec![]));
+        assert_eq!(
+            s.local(key(KeyCode::PageUp, true)).actions,
+            [Action::Media(MediaCommand::Back)]
+        );
+        assert_eq!(
+            s.local(key(KeyCode::PageDown, true)).actions,
+            [Action::Media(MediaCommand::Forward)]
+        );
+    }
+
+    #[test]
+    fn a_media_shortcut_works_from_another_device_too() {
+        let mut s = with_media();
+        s.local(motion(1919.0, 540.0));
+        assert_eq!(s.controlling(), Some(PEER));
+        press_all(&mut s, &[KeyCode::ControlRight, KeyCode::AltLeft]);
+        assert_eq!(
+            s.local(key(PLAY, true)),
+            Outcome::swallow(vec![Action::Media(MediaCommand::PlayPause)])
+        );
+        assert_eq!(s.controlling(), Some(PEER), "the cursor stays where it is");
+    }
+
+    #[test]
+    fn with_nothing_to_play_the_keys_stay_with_the_program_in_front() {
+        let mut s = peer_on_the_right();
+        press_all(&mut s, &[KeyCode::ControlLeft, KeyCode::AltLeft]);
+        assert_eq!(s.local(key(PLAY, true)), Outcome::pass());
+        s.local(key(PLAY, false));
+
+        s.set_media_available(true);
+        assert!(s.local(key(PLAY, true)).swallow);
+    }
+
+    #[test]
+    fn media_shortcuts_can_be_turned_off_together_or_one_at_a_time() {
+        let mut s = with_media();
+        let mut rules = Rules::default();
+        rules.media_shortcuts.play_pause = Shortcut::default();
+        s.set_rules(rules.clone());
+        press_all(&mut s, &[KeyCode::ControlLeft, KeyCode::AltLeft]);
+        assert_eq!(s.local(key(PLAY, true)), Outcome::pass());
+        assert!(s.local(key(KeyCode::PageUp, true)).swallow);
+        s.local(key(KeyCode::PageUp, false));
+
+        rules.media_shortcuts.enabled = false;
+        s.set_rules(rules);
+        assert_eq!(s.local(key(KeyCode::PageUp, true)), Outcome::pass());
+    }
+
+    #[test]
+    fn a_media_shortcut_needs_exactly_its_own_modifiers() {
+        let mut s = with_media();
+        assert_eq!(s.local(key(PLAY, true)), Outcome::pass(), "just the key");
+        s.local(key(PLAY, false));
+
+        s.local(key(KeyCode::ControlLeft, true));
+        assert_eq!(s.local(key(PLAY, true)), Outcome::pass(), "only Ctrl");
+        s.local(key(PLAY, false));
+
+        press_all(&mut s, &[KeyCode::AltLeft, KeyCode::ShiftLeft]);
+        assert_eq!(s.local(key(PLAY, true)), Outcome::pass(), "and also Shift");
+    }
+
+    /// Windows reports AltGr as Ctrl + right Alt, and it's for typing characters.
+    #[test]
+    fn altgr_never_completes_a_media_shortcut() {
+        let mut s = with_media();
+        press_all(&mut s, &[KeyCode::ControlLeft, KeyCode::AltRight]);
+        assert_eq!(s.local(key(PLAY, true)), Outcome::pass());
+    }
+
+    #[test]
+    fn a_media_shortcut_can_be_any_key_chosen() {
+        let mut s = with_media();
+        let mut rules = Rules::default();
+        rules.media_shortcuts.play_pause = Shortcut {
+            key: Some(KeyCode::MediaPlayPause),
+            ..Shortcut::default()
+        };
+        rules.media_shortcuts.forward = Shortcut {
+            meta: true,
+            shift: true,
+            key: Some(KeyCode::KeyN),
+            ..Shortcut::default()
+        };
+        s.set_rules(rules);
+
+        assert_eq!(
+            s.local(key(KeyCode::MediaPlayPause, true)).actions,
+            [Action::Media(MediaCommand::PlayPause)]
+        );
+        press_all(&mut s, &[KeyCode::MetaRight, KeyCode::ShiftRight]);
+        assert_eq!(
+            s.local(key(KeyCode::KeyN, true)).actions,
+            [Action::Media(MediaCommand::Forward)]
+        );
+    }
+
+    #[test]
+    fn choosing_a_new_shortcut_leaves_all_of_them_alone() {
+        let mut s = with_media();
+        s.set_jump_order(vec![ME, PEER]);
+        s.set_shortcuts_paused(true);
+        press_all(&mut s, &[KeyCode::ControlLeft, KeyCode::AltLeft]);
+        for code in [PLAY, KeyCode::KeyL, KeyCode::Digit2] {
+            assert_eq!(s.local(key(code, true)), Outcome::pass(), "{code}");
+            s.local(key(code, false));
+        }
+        assert_eq!(s.controlling(), None);
+        assert!(!s.locked());
+
+        s.set_shortcuts_paused(false);
+        assert!(s.local(key(PLAY, true)).swallow);
+    }
+
+    /// A key pressed just before choosing began has to be let go of the same way.
+    #[test]
+    fn letting_go_of_a_shortcut_still_counts_while_choosing_a_new_one() {
+        let mut s = with_media();
+        press_all(&mut s, &[KeyCode::ControlLeft, KeyCode::AltLeft]);
+        assert!(s.local(key(PLAY, true)).swallow);
+        s.set_shortcuts_paused(true);
+        assert!(s.local(key(PLAY, false)).swallow);
+    }
+
+    /// One a user picked that's taken by these is theirs to sort out, but these stay as
+    /// they were.
+    #[test]
+    fn the_shortcuts_that_were_there_first_come_first() {
+        let mut s = with_media();
+        let mut rules = Rules::default();
+        rules.media_shortcuts.play_pause = Shortcut {
+            ctrl: true,
+            alt: true,
+            key: Some(KeyCode::KeyL),
+            ..Shortcut::default()
+        };
+        s.set_rules(rules);
+        press_all(&mut s, &[KeyCode::ControlLeft, KeyCode::AltLeft]);
+        assert_eq!(
+            s.local(key(KeyCode::KeyL, true)).actions,
+            [Action::StateChanged]
+        );
+        assert!(s.locked());
     }
 
     #[test]
