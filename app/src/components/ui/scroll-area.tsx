@@ -15,7 +15,10 @@ function ScrollArea({
     >
       <ScrollAreaPrimitive.Viewport
         data-slot="scroll-area-viewport"
-        className="size-full rounded-[inherit] transition-[color,box-shadow] outline-none focus-visible:ring-[3px] focus-visible:ring-ring/50 focus-visible:outline-1"
+        // Radix wraps the content in a box laid out as a table, which grows to fit its longest
+        // line, so nothing inside could ever be cut short with "…". These lists only scroll
+        // up and down, so that box stays the width of the list.
+        className="size-full rounded-[inherit] transition-[color,box-shadow] outline-none focus-visible:ring-[3px] focus-visible:ring-ring/50 focus-visible:outline-1 [&>div]:block!"
       >
         {children}
       </ScrollAreaPrimitive.Viewport>
