@@ -154,6 +154,37 @@ and it's sent Stremio's own keys: Space and the left and right arrows.
 can stop other computers seeing what's open here or controlling what's playing here. A locked
 computer does neither. All your computers need this version for any of this.
 
+### What's on the screens
+
+Each screen on the canvas can show a live picture of what's on it, about once a second. The button
+at its top right, double-clicking it, or Enter with it selected opens it larger, with about ten
+pictures a second and the cursor showing. It's for looking at: to use that computer, move the
+cursor there.
+
+**Nothing leaves a computer until you say so.** To see a computer's screens from another one, open
+Hackerman on the computer to be seen, go to **Settings > Screens**, and turn it on for the computer
+doing the looking. It's one switch for each computer, in one direction, and forgetting a computer
+takes it back.
+
+- A computer being looked at says so at the top of Hackerman's window, with a button to stop it,
+  and when pointing at the tray icon. It also shows one Windows notification the first time for
+  each computer, each time Hackerman starts.
+- Anything on the screen can be seen, including private messages and whatever's being typed.
+- Pictures are only taken while the window of the computer looking is open and not minimized. With
+  the window closed to the tray, nothing is taken at all.
+- Nothing can be seen of a locked computer, a sign-in screen, or an administrator prompt, and nothing
+  of a computer that's disabled. Programs can also keep their windows out of pictures, and films
+  protected against copying usually show as black.
+- Pictures go directly between the two computers, encrypted, and aren't saved anywhere.
+- It doesn't get in the way of the mouse: pictures are sent after input, and are skipped if nothing
+  on the screen has changed.
+
+**Show what's on the screens** in the same place turns the pictures off on this computer's canvas.
+A screen being looked at from here can't be clicked on, and a computer can't be used as an extra
+monitor for another: that takes a display driver, which is a project of its own.
+
+All the computers involved need this version.
+
 ### Keyboard shortcuts
 
 | Keys | What they do |

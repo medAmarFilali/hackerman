@@ -8,6 +8,7 @@ use std::sync::OnceLock;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::{Duration, Instant};
 
+use base64::Engine as _;
 use hk_core::apps::{MediaCommand, MediaState, RunningApp};
 use hk_core::clipboard::{ClipVersion, ClipboardData, ClipboardImage, SharedFile};
 use hk_core::device::Fingerprint;
@@ -15,17 +16,20 @@ use hk_core::geometry::{Point, Rect};
 use hk_core::input::{InputEvent, KeyCode};
 use hk_core::layout::{LayoutDoc, Monitor, Placement};
 use hk_core::rules::{CrossModifier, NameClash, ReceiveFiles, Rules, Shortcut};
+use hk_core::screens::{MAX_PICTURE_BYTES, ScreenImage};
 use hk_core::switcher::LocalEvent;
 use hk_daemon::{Options, lock_screen, run};
 use hk_ipc::{
-    ControlView, DeviceStatus, IpcConnection, PairingStage, Request, TransferStage, UiState,
+    ControlView, DeviceStatus, FromAgent, IpcConnection, PairingStage, PictureAnswer, Request,
+    ScreenAsk, ScreenPicture, TransferStage, UiState,
 };
 use hk_net::{Endpoint, Identity, TrustStore};
 use hk_platform::Platform;
 use hk_platform::fake::FakePlatform;
 use hk_proto::{
-    ClipboardBlob, FEATURE_FILES, FEATURE_SEND_FILES, FEATURES, FileAnswer, FileRequest, Message,
-    PROTOCOL_VERSION, TransferUpdate,
+    ClipboardBlob, FEATURE_FILES, FEATURE_SCREENS, FEATURE_SEND_FILES, FEATURES, FileAnswer,
+    FileRequest, Message, PROTOCOL_VERSION, PeerRequest, ScreenAnswer, ScreenRequest,
+    TransferUpdate,
 };
 use tokio::task::JoinHandle;
 
@@ -39,6 +43,8 @@ struct Device {
     platform: FakePlatform,
     app: Option<IpcConnection>,
     state: UiState,
+    /// Answers about pictures that nothing has looked at yet.
+    pictures: Vec<ScreenPicture>,
     task: JoinHandle<anyhow::Result<()>>,
     dir: PathBuf,
     keep_dir: bool,
@@ -105,10 +111,10 @@ impl Device {
         let mut attempts = 0;
         let (app, state) = loop {
             if let Ok(mut app) = hk_ipc::connect(&channel).await
-                && let Ok(Ok(Some(state))) =
+                && let Ok(Ok(Some(FromAgent::State(state)))) =
                     tokio::time::timeout(Duration::from_millis(500), app.recv()).await
             {
-                break (app, state);
+                break (app, *state);
             }
             attempts += 1;
             assert!(
@@ -123,6 +129,7 @@ impl Device {
             platform,
             app: Some(app),
             state,
+            pictures: Vec::new(),
             task,
             dir,
             keep_dir: false,
@@ -151,12 +158,7 @@ impl Device {
         let name = self.name.clone();
         let wait = async {
             while !check(&self.state) {
-                self.state = self
-                    .app()
-                    .recv()
-                    .await
-                    .unwrap()
-                    .expect("the agent stopped unexpectedly");
+                self.next_from_agent().await;
             }
         };
         if tokio::time::timeout(TIMEOUT, wait).await.is_err() {
@@ -165,6 +167,54 @@ impl Device {
                 self.state
             );
         }
+    }
+
+    /// Reads one message from the agent, the way the app does.
+    async fn next_from_agent(&mut self) {
+        match self
+            .app()
+            .recv()
+            .await
+            .unwrap()
+            .expect("the agent stopped unexpectedly")
+        {
+            FromAgent::State(state) => self.state = *state,
+            FromAgent::Picture(picture) => self.pictures.push(picture),
+        }
+    }
+
+    /// Asks for a picture of a screen, and waits for the answer.
+    async fn picture_of(
+        &mut self,
+        device: Fingerprint,
+        monitor: &str,
+        max_width: u16,
+        known: u32,
+    ) -> PictureAnswer {
+        let id = u64::from(unique_id());
+        self.request(Request::ScreenPicture {
+            id,
+            ask: ScreenAsk {
+                device,
+                monitor: monitor.to_string(),
+                max_width,
+                max_height: max_width,
+                known,
+                cursor: false,
+            },
+        })
+        .await;
+        let wait = async {
+            loop {
+                if let Some(at) = self.pictures.iter().position(|picture| picture.id == id) {
+                    return self.pictures.remove(at).answer;
+                }
+                self.next_from_agent().await;
+            }
+        };
+        tokio::time::timeout(TIMEOUT, wait)
+            .await
+            .expect("no answer about a picture")
     }
 
     async fn wait_connected_to(&mut self, other: Fingerprint) {
@@ -4215,4 +4265,400 @@ async fn shortcuts_do_nothing_while_a_new_one_is_being_chosen() {
     let_things_settle().await;
     assert!(press_with_ctrl_alt(&a, KeyCode::Space));
     wait_for_media_command(&b, "spotify", MediaCommand::PlayPause).await;
+}
+
+// Pictures of the screens
+
+fn a_picture(width: u32, height: u32, shade: u8) -> ScreenImage {
+    ScreenImage {
+        width,
+        height,
+        bgra: [shade, shade, shade, 0].repeat((width * height) as usize),
+    }
+}
+
+/// What a picture's answer says, checking that it really is a JPEG of that size.
+fn picture_in(answer: &PictureAnswer) -> (u16, u16, u32) {
+    let PictureAnswer::Picture {
+        url,
+        width,
+        height,
+        fingerprint,
+    } = answer
+    else {
+        panic!("wanted a picture, got {answer:?}");
+    };
+    let encoded = url
+        .strip_prefix("data:image/jpeg;base64,")
+        .expect("something a page can show");
+    let jpeg = base64::engine::general_purpose::STANDARD
+        .decode(encoded)
+        .unwrap();
+    let decoded = image::load_from_memory_with_format(&jpeg, image::ImageFormat::Jpeg).unwrap();
+    assert_eq!(
+        (decoded.width(), decoded.height()),
+        (u32::from(*width), u32::from(*height))
+    );
+    (*width, *height, *fingerprint)
+}
+
+fn allows_screens_of(state: &UiState, device: Fingerprint) -> bool {
+    state
+        .devices
+        .iter()
+        .any(|d| d.fingerprint == device && d.screens_allowed)
+}
+
+fn is_watched_by(state: &UiState, device: Fingerprint) -> bool {
+    state
+        .devices
+        .iter()
+        .any(|d| d.fingerprint == device && d.watching_screens)
+}
+
+impl Device {
+    async fn allow_screens(&mut self, device: Fingerprint, allowed: bool) {
+        self.request(Request::SetScreensAllowed { device, allowed })
+            .await;
+        self.wait_for("the new permission", |s| {
+            allows_screens_of(s, device) == allowed
+        })
+        .await;
+    }
+}
+
+/// The most important thing about this: nothing is even taken until the PC showing it says so,
+/// and saying so is about one PC only, in one direction.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_pc_shows_nothing_until_its_user_allows_that_pc() {
+    let (mut a, mut b) = side_by_side().await;
+    let (a_id, b_id) = (a.fingerprint(), b.fingerprint());
+
+    assert_eq!(
+        a.picture_of(b_id, "fake-0", 640, 0).await,
+        PictureAnswer::NotAllowed
+    );
+    assert!(b.platform.screen_captures().is_empty(), "nothing was taken");
+    assert!(!is_watched_by(&b.state, a_id));
+
+    b.allow_screens(a_id, true).await;
+    let (width, height, _) = picture_in(&a.picture_of(b_id, "fake-0", 640, 0).await);
+    assert_eq!((width, height), (640, 360));
+    assert_eq!(b.platform.screen_captures().len(), 1);
+    b.wait_for("being told who's looking", |s| is_watched_by(s, a_id))
+        .await;
+
+    // That was only one way round.
+    assert_eq!(
+        b.picture_of(a_id, "fake-0", 640, 0).await,
+        PictureAnswer::NotAllowed
+    );
+    assert!(a.platform.screen_captures().is_empty());
+
+    // Taking it back works at once.
+    b.allow_screens(a_id, false).await;
+    b.wait_for("no longer being looked at", |s| !is_watched_by(s, a_id))
+        .await;
+    assert_eq!(
+        a.picture_of(b_id, "fake-0", 640, 0).await,
+        PictureAnswer::NotAllowed
+    );
+    assert_eq!(b.platform.screen_captures().len(), 1);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn being_looked_at_stops_showing_soon_after_the_pictures_stop() {
+    let (mut a, mut b) = side_by_side().await;
+    let (a_id, b_id) = (a.fingerprint(), b.fingerprint());
+    b.allow_screens(a_id, true).await;
+    picture_in(&a.picture_of(b_id, "fake-0", 320, 0).await);
+    b.wait_for("being looked at", |s| is_watched_by(s, a_id))
+        .await;
+    b.wait_for("no longer being looked at", |s| !is_watched_by(s, a_id))
+        .await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_picture_that_has_not_changed_is_not_sent_again() {
+    let (mut a, mut b) = side_by_side().await;
+    let (a_id, b_id) = (a.fingerprint(), b.fingerprint());
+    b.allow_screens(a_id, true).await;
+    b.platform
+        .set_screen_picture("fake-0", a_picture(1920, 1080, 40));
+
+    let (_, _, first) = picture_in(&a.picture_of(b_id, "fake-0", 640, 0).await);
+    assert_eq!(
+        a.picture_of(b_id, "fake-0", 640, first).await,
+        PictureAnswer::Unchanged
+    );
+
+    b.platform
+        .set_screen_picture("fake-0", a_picture(1920, 1080, 90));
+    let (_, _, second) = picture_in(&a.picture_of(b_id, "fake-0", 640, first).await);
+    assert_ne!(first, second);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_picture_is_no_bigger_than_asked_or_than_the_limit() {
+    let (mut a, mut b) = side_by_side().await;
+    let (a_id, b_id) = (a.fingerprint(), b.fingerprint());
+    b.allow_screens(a_id, true).await;
+    // Long and thin, since a really big one takes a while in a test build.
+    b.platform
+        .set_screen_picture("fake-0", a_picture(5120, 200, 40));
+
+    assert_eq!(
+        picture_in(&a.picture_of(b_id, "fake-0", 320, 0).await).0,
+        320
+    );
+    let (width, height, _) = picture_in(&a.picture_of(b_id, "fake-0", u16::MAX, 0).await);
+    assert_eq!((width, height), (2560, 100));
+    // A small screen isn't made any larger.
+    b.platform
+        .set_screen_picture("fake-0", a_picture(800, 600, 40));
+    let (width, height, _) = picture_in(&a.picture_of(b_id, "fake-0", 2000, 0).await);
+    assert_eq!((width, height), (800, 600));
+}
+
+/// What's on a locked PC isn't for sharing, even with one allowed to see its screens.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_locked_pc_has_nothing_to_show() {
+    let (mut a, mut b) = side_by_side().await;
+    let (a_id, b_id) = (a.fingerprint(), b.fingerprint());
+    b.allow_screens(a_id, true).await;
+
+    b.platform.set_screens_locked(true);
+    assert_eq!(
+        a.picture_of(b_id, "fake-0", 640, 0).await,
+        PictureAnswer::Unavailable
+    );
+    b.platform.set_screens_locked(false);
+    picture_in(&a.picture_of(b_id, "fake-0", 640, 0).await);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_disabled_pc_neither_shows_nor_asks_to_see() {
+    let (mut a, mut b) = side_by_side().await;
+    let (a_id, b_id) = (a.fingerprint(), b.fingerprint());
+    b.allow_screens(a_id, true).await;
+    picture_in(&a.picture_of(b_id, "fake-0", 640, 0).await);
+    let taken = b.platform.screen_captures().len();
+
+    b.request(Request::SetEnabled { enabled: false }).await;
+    a.wait_until_status(b_id, DeviceStatus::Off).await;
+    assert_eq!(
+        a.picture_of(b_id, "fake-0", 640, 0).await,
+        PictureAnswer::Unavailable
+    );
+    assert_eq!(b.platform.screen_captures().len(), taken);
+
+    b.request(Request::SetEnabled { enabled: true }).await;
+    a.wait_until_status(b_id, DeviceStatus::Connected).await;
+    picture_in(&a.picture_of(b_id, "fake-0", 640, 0).await);
+
+    a.request(Request::SetEnabled { enabled: false }).await;
+    a.wait_for("being off", |s| !s.enabled).await;
+    assert_eq!(
+        a.picture_of(b_id, "fake-0", 640, 0).await,
+        PictureAnswer::Unavailable
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn this_pcs_own_screens_need_nobody_to_allow_them() {
+    let mut a = Device::start("alpha").await;
+    let me = a.fingerprint();
+    picture_in(&a.picture_of(me, "fake-0", 640, 0).await);
+    assert_eq!(
+        a.picture_of(me, "not a screen", 640, 0).await,
+        PictureAnswer::Unavailable
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_screen_that_is_not_there_or_a_pc_that_is_not_there_has_nothing_to_show() {
+    let (mut a, mut b) = side_by_side().await;
+    let (a_id, b_id) = (a.fingerprint(), b.fingerprint());
+    b.allow_screens(a_id, true).await;
+    assert_eq!(
+        a.picture_of(b_id, "not a screen", 640, 0).await,
+        PictureAnswer::Unavailable
+    );
+    assert_eq!(
+        a.picture_of(Fingerprint::from_bytes([9; 32]), "fake-0", 640, 0)
+            .await,
+        PictureAnswer::Unavailable
+    );
+}
+
+/// Whoever it is, once forgotten it has to be allowed all over again.
+#[tokio::test(flavor = "multi_thread")]
+async fn forgetting_a_pc_takes_back_what_it_was_allowed() {
+    let (mut a, mut b) = side_by_side().await;
+    let (a_id, b_id) = (a.fingerprint(), b.fingerprint());
+    b.allow_screens(a_id, true).await;
+    picture_in(&a.picture_of(b_id, "fake-0", 640, 0).await);
+
+    b.request(Request::Forget { device: a_id }).await;
+    a.request(Request::Forget { device: b_id }).await;
+    b.wait_for("forgotten", |s| {
+        s.devices.iter().all(|d| d.fingerprint != a_id)
+    })
+    .await;
+    a.wait_for("forgotten", |s| {
+        s.devices.iter().all(|d| d.fingerprint != b_id)
+    })
+    .await;
+
+    pair(&mut a, &mut b).await;
+    assert!(!allows_screens_of(&b.state, a_id));
+    assert_eq!(
+        a.picture_of(b_id, "fake-0", 640, 0).await,
+        PictureAnswer::NotAllowed
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn allowing_a_pc_lasts_across_a_restart() {
+    let (a, mut b) = side_by_side().await;
+    let a_id = a.fingerprint();
+    b.allow_screens(a_id, true).await;
+    let (dir, channel, platform) = b.stop_for_restart().await;
+    let mut b = Device::start_in("bravo", dir, channel, platform).await;
+    assert!(allows_screens_of(&b.state, a_id));
+    b.keep_dir = false;
+}
+
+/// A device that hasn't got this yet never hears of it, and the rest keeps working.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_pc_on_an_older_version_is_never_asked_for_pictures() {
+    let (mut a, peer) = device_with_hand_written_peer(FEATURES & !FEATURE_SCREENS).await;
+    assert_eq!(
+        a.picture_of(peer.id, "old", 640, 0).await,
+        PictureAnswer::NeedsUpdate
+    );
+    // Anything asked of that peer would show up here, as it has nothing else to read.
+    let asked = tokio::time::timeout(TICK_AND_A_BIT, peer.blobs.next_request()).await;
+    assert!(asked.is_err(), "it was asked for something");
+    a.wait_until_status(peer.id, DeviceStatus::Connected).await;
+}
+
+/// Pairs of what a misbehaving device says it's sending, and what it really sends.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_picture_from_another_pc_has_to_be_a_picture_of_a_sensible_size() {
+    let (mut a, peer) = device_with_hand_written_peer(FEATURES).await;
+    let blobs = peer.blobs.clone();
+    let server = tokio::spawn(async move {
+        loop {
+            let Ok(request) = blobs.next_request().await else {
+                return;
+            };
+            let (asked, mut writer) = request.read().await.unwrap();
+            let PeerRequest::Screen(asked) = hk_proto::decode_peer_request(&asked).unwrap() else {
+                panic!("that wasn't asking for a picture");
+            };
+            let answer = hk_proto::encode_screen_answer(&ScreenAnswer::Picture {
+                width: 10,
+                height: 10,
+                fingerprint: 5,
+            })
+            .unwrap();
+            writer.write_message(&answer).await.unwrap();
+            match asked.monitor.as_str() {
+                "script" => writer.write(b"<script>alert(1)</script>").await.unwrap(),
+                "huge" => {
+                    let mut huge = vec![0; MAX_PICTURE_BYTES + 1024];
+                    huge[..3].copy_from_slice(&[0xFF, 0xD8, 0xFF]);
+                    // It stops being read long before this ends.
+                    let _ = writer.write(&huge).await;
+                }
+                _ => {}
+            }
+            let _ = writer.finish();
+        }
+    });
+    assert_eq!(
+        a.picture_of(peer.id, "script", 640, 0).await,
+        PictureAnswer::Unavailable
+    );
+    assert_eq!(
+        a.picture_of(peer.id, "huge", 640, 0).await,
+        PictureAnswer::Unavailable
+    );
+    assert_eq!(
+        a.picture_of(peer.id, "empty", 640, 0).await,
+        PictureAnswer::Unavailable
+    );
+    a.wait_until_status(peer.id, DeviceStatus::Connected).await;
+    server.abort();
+}
+
+/// However many pictures a device asks for, they're taken one at a time and the rest are told
+/// to wait, and every one of them gets an answer.
+#[tokio::test(flavor = "multi_thread")]
+async fn asking_for_far_too_many_pictures_only_gets_told_to_wait() {
+    let (mut a, peer) = device_with_hand_written_peer(FEATURES).await;
+    a.allow_screens(peer.id, true).await;
+    a.platform.set_screens_moving(true);
+    let asking: Vec<_> = (0..40)
+        .map(|_| {
+            let blobs = peer.blobs.clone();
+            tokio::spawn(async move {
+                let request = hk_proto::encode_screen_request(&ScreenRequest {
+                    monitor: "fake-0".into(),
+                    max_width: 320,
+                    max_height: 320,
+                    known: 0,
+                    cursor: false,
+                })
+                .unwrap();
+                let mut reader = blobs.request(&request).await.unwrap();
+                hk_proto::decode_screen_answer(&reader.read_message().await.unwrap()).unwrap()
+            })
+        })
+        .collect();
+    let mut told_to_wait = 0;
+    let mut pictures = 0;
+    for asked in asking {
+        let answer = tokio::time::timeout(TIMEOUT, asked).await.unwrap().unwrap();
+        match answer {
+            ScreenAnswer::Busy => told_to_wait += 1,
+            ScreenAnswer::Picture { .. } => pictures += 1,
+            other => panic!("{other:?}"),
+        }
+    }
+    assert_eq!(told_to_wait + pictures, 40);
+    assert!(told_to_wait > 0, "nothing was held back");
+    assert_eq!(a.platform.screen_captures().len(), pictures);
+    a.wait_until_status(peer.id, DeviceStatus::Connected).await;
+}
+
+/// The whole point of keeping pictures on streams of their own.
+#[tokio::test(flavor = "multi_thread")]
+async fn input_keeps_arriving_while_pictures_are_going_the_other_way() {
+    let (mut a, mut b) = side_by_side().await;
+    let (a_id, b_id) = (a.fingerprint(), b.fingerprint());
+    b.allow_screens(a_id, true).await;
+    b.platform.set_screens_moving(true);
+    assert!(a.move_mouse(1919.0, 500.0));
+
+    for step in 0..30 {
+        picture_in(&a.picture_of(b_id, "fake-0", 1920, 0).await);
+        let seen = b.platform.injected().len();
+        // Either side of where the cursor is parked here. All of this goes to the other PC.
+        let x = if step % 2 == 0 { 963.0 } else { 957.0 };
+        assert!(a.move_mouse(x, 540.0));
+        wait_for_any_more_input(&b, seen).await;
+    }
+}
+
+async fn wait_for_any_more_input(device: &Device, seen: usize) {
+    let wait = async {
+        while device.platform.injected().len() <= seen {
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    };
+    tokio::time::timeout(Duration::from_secs(2), wait)
+        .await
+        .expect("input stopped arriving");
 }

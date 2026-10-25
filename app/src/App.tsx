@@ -1,4 +1,4 @@
-import { CircleAlert, Loader2, Lock, LockOpen, MonitorUp, Power } from "lucide-react";
+import { CircleAlert, Eye, Loader2, Lock, LockOpen, MonitorUp, Power } from "lucide-react";
 
 import { PairingArt } from "@/components/Art";
 import { DevicesPanel } from "@/components/DevicesPanel";
@@ -40,6 +40,7 @@ export function App() {
               aren't using.
             </Banner>
           )}
+          <Watching state={state} />
         </div>
         <Status state={state} />
         <main className="flex min-h-0 flex-col">
@@ -80,6 +81,31 @@ function Banner({ children }: { children: React.ReactNode }) {
       <span>{children}</span>
     </p>
   );
+}
+
+/** Someone being able to see this PC's screens has to be plain to anyone sitting at it. */
+function Watching({ state }: { state: UiState }) {
+  return state.devices
+    .filter((device) => device.watchingScreens)
+    .map((device) => (
+      <div
+        key={device.fingerprint}
+        role="status"
+        className="flex items-center gap-2 border-b bg-signal-soft px-5 py-1.5 text-sm"
+      >
+        <Eye aria-hidden className="size-4 shrink-0 text-signal" strokeWidth={1.5} />
+        <span className="min-w-0 flex-1 truncate">{device.name} is looking at this PC's screens.</span>
+        <Button
+          size="xs"
+          variant="secondary"
+          onClick={() =>
+            send({ type: "setScreensAllowed", device: device.fingerprint, allowed: false })
+          }
+        >
+          Stop it
+        </Button>
+      </div>
+    ));
 }
 
 function TopBar({ state }: { state: UiState }) {

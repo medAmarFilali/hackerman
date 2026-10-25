@@ -126,6 +126,23 @@ pub(super) fn screen_in_use() -> bool {
     console_session().and_then(console_state) == Some(ConsoleState::Unlocked)
 }
 
+/// Whether what's taking input is the desktop people's programs are on, as opposed to a
+/// protected one like the lock screen, an administrator prompt or a screen saver. An ordinary
+/// program is refused a look at those, which comes to the same thing.
+pub(super) fn users_desktop_in_front() -> bool {
+    // SAFETY: the handle is checked, and closed as soon as its name has been read.
+    unsafe {
+        let Ok(desktop) =
+            OpenInputDesktop(DESKTOP_CONTROL_FLAGS(0), false, DESKTOP_ACCESS_FLAGS(0))
+        else {
+            return false;
+        };
+        let users = desktop_name(desktop).is_some_and(|name| is_users_desktop(&name));
+        let _ = CloseDesktop(desktop);
+        users
+    }
+}
+
 /// Whether the normal agent should stop and leave this computer to the helper: this
 /// session isn't the one on the screen, or it's locked.
 pub(super) fn helper_takes_over() -> bool {

@@ -1,8 +1,10 @@
-//! Tells the user when files from another PC have arrived. That can happen with the
-//! window closed, and nothing else would show it.
+//! Tells the user when files from another PC have arrived, and when another PC starts looking at
+//! this one's screens. Those can happen with the window closed, and nothing else would show them.
 
+use std::collections::HashSet;
 use std::path::Path;
 
+use hk_core::device::Fingerprint;
 use hk_ipc::{TransferStage, TransferView, UiState};
 use tauri::AppHandle;
 
@@ -53,6 +55,42 @@ pub fn arrivals(previous: &UiState, state: &UiState) -> Vec<Arrival> {
             }
         })
         .collect()
+}
+
+/// PCs looking at this one's screens that the user hasn't been told about yet.
+pub fn newly_watching(state: &UiState, told: &mut HashSet<Fingerprint>) -> Vec<Arrival> {
+    state
+        .devices
+        .iter()
+        .filter(|device| device.watching_screens && told.insert(device.fingerprint))
+        .map(|device| Arrival {
+            title: shortened(&format!("{} can see this PC's screens", device.name)),
+            text: "Hackerman's window says when it's looking, and you can stop it there or in Settings."
+                .to_string(),
+            folder: None,
+        })
+        .collect()
+}
+
+/// What the tray icon says when pointed at.
+pub fn tray_tooltip(state: &UiState) -> String {
+    let watching: Vec<&str> = state
+        .devices
+        .iter()
+        .filter(|device| device.watching_screens)
+        .map(|device| device.name.as_str())
+        .collect();
+    if !watching.is_empty() {
+        return shortened(&format!(
+            "Hackerman ({} is looking at this PC)",
+            watching.join(", ")
+        ));
+    }
+    if state.enabled {
+        "Hackerman".to_string()
+    } else {
+        "Hackerman (disabled)".to_string()
+    }
 }
 
 fn saved_text(transfer: &TransferView) -> String {
@@ -145,6 +183,8 @@ mod tests {
                 needs_update_for_files: false,
                 can_receive_files: true,
                 files_allowed: false,
+                screens_allowed: true,
+                watching_screens: false,
             }],
             screens: vec![],
             pairing: None,
@@ -161,6 +201,38 @@ mod tests {
             saved_layouts: 1,
             rival_programs: vec![],
         }
+    }
+
+    #[test]
+    fn being_looked_at_is_told_once_for_each_pc() {
+        let mut state = state_with(vec![]);
+        let mut told = HashSet::new();
+        assert!(newly_watching(&state, &mut told).is_empty());
+
+        state.devices[0].watching_screens = true;
+        let news = newly_watching(&state, &mut told);
+        assert_eq!(news.len(), 1);
+        assert!(news[0].title.contains("MAIN"), "{}", news[0].title);
+        assert!(newly_watching(&state, &mut told).is_empty());
+
+        // Stopping and starting again isn't news, since the window and tray still show it.
+        state.devices[0].watching_screens = false;
+        assert!(newly_watching(&state, &mut told).is_empty());
+        state.devices[0].watching_screens = true;
+        assert!(newly_watching(&state, &mut told).is_empty());
+    }
+
+    #[test]
+    fn the_tray_says_who_is_looking() {
+        let mut state = state_with(vec![]);
+        assert_eq!(tray_tooltip(&state), "Hackerman");
+        state.enabled = false;
+        assert_eq!(tray_tooltip(&state), "Hackerman (disabled)");
+        state.devices[0].watching_screens = true;
+        assert_eq!(
+            tray_tooltip(&state),
+            "Hackerman (MAIN is looking at this PC)"
+        );
     }
 
     #[test]

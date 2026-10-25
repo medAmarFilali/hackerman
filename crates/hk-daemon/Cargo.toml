@@ -22,6 +22,7 @@ hk-ipc.workspace = true
 hk-net.workspace = true
 hk-platform.workspace = true
 hk-proto.workspace = true
+image.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 tokio.workspace = true

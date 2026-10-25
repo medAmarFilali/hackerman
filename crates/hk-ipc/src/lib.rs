@@ -3,8 +3,8 @@
 //!
 //! The agent keeps running with no window open, so the app is only a view: it
 //! sends [`Request`]s and the agent answers every change with a full
-//! [`UiState`]. Input never passes through here. These are JSON text lines over
-//! a local channel that only the current user can open.
+//! [`UiState`], in a [`FromAgent`]. Input never passes through here. These are
+//! JSON text lines over a local channel that only the current user can open.
 
 mod transport;
 
@@ -94,8 +94,74 @@ pub enum Request {
     RecordingShortcut {
         active: bool,
     },
+    /// Whether a device can see this device's screens.
+    SetScreensAllowed {
+        device: Fingerprint,
+        allowed: bool,
+    },
+    /// Asks for a picture of a screen on a device, which may be this one. The answer comes
+    /// back with this `id`, as a [`ScreenPicture`].
+    ScreenPicture {
+        id: u64,
+        #[serde(flatten)]
+        ask: ScreenAsk,
+    },
     /// Stop the agent.
     Shutdown,
+}
+
+/// Which picture of which screen.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ScreenAsk {
+    pub device: Fingerprint,
+    pub monitor: String,
+    /// The picture has to fit in this.
+    pub max_width: u16,
+    pub max_height: u16,
+    /// The [`PictureAnswer::Picture::fingerprint`] of the picture already on show, or zero.
+    pub known: u32,
+    /// Whether to draw the cursor on it.
+    pub cursor: bool,
+}
+
+/// What the agent tells the app.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum FromAgent {
+    State(Box<UiState>),
+    Picture(ScreenPicture),
+}
+
+/// The answer to [`Request::ScreenPicture`].
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ScreenPicture {
+    pub id: u64,
+    pub answer: PictureAnswer,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "status", rename_all = "camelCase")]
+pub enum PictureAnswer {
+    /// A new picture, ready to show.
+    #[serde(rename_all = "camelCase")]
+    Picture {
+        url: String,
+        width: u16,
+        height: u16,
+        fingerprint: u32,
+    },
+    /// It's the same as the one already on show.
+    Unchanged,
+    /// That device's user hasn't allowed this.
+    NotAllowed,
+    /// That device is running a version from before this could be done.
+    NeedsUpdate,
+    /// There's nothing to show right now. That device may be locked, offline or disabled.
+    Unavailable,
+    /// Too many are being taken at once, so ask again in a moment.
+    Busy,
 }
 
 /// Everything the app shows. Sent whenever any of it changes.
@@ -223,6 +289,10 @@ pub struct DeviceView {
     pub can_receive_files: bool,
     /// The user said it can send files here without asking.
     pub files_allowed: bool,
+    /// The user said it can see this device's screens.
+    pub screens_allowed: bool,
+    /// It has just been looking at them.
+    pub watching_screens: bool,
 }
 
 /// A monitor on the canvas.
@@ -399,6 +469,8 @@ mod tests {
                 needs_update_for_files: true,
                 can_receive_files: false,
                 files_allowed: true,
+                screens_allowed: true,
+                watching_screens: true,
             }],
             screens: vec![],
             pairing: None,
@@ -427,6 +499,8 @@ mod tests {
             rival_programs: vec!["Input Director".into()],
         };
         let json = serde_json::to_value(&state).unwrap();
+        assert_eq!(json["devices"][0]["screensAllowed"], true);
+        assert_eq!(json["devices"][0]["watchingScreens"], true);
         assert_eq!(json["rivalPrograms"][0], "Input Director");
         assert_eq!(json["rules"]["shareApps"], true);
         assert_eq!(json["rules"]["mediaControl"], true);
@@ -450,6 +524,71 @@ mod tests {
         assert_eq!(json["devices"][0]["status"], "incompatible");
         assert_eq!(json["devices"][0]["needsUpdateForFiles"], true);
         assert_eq!(json["control"]["state"], "home");
+    }
+
+    #[test]
+    fn pictures_use_the_format_the_app_sends_and_reads() {
+        let request: Request = serde_json::from_str(&format!(
+            r#"{{"type":"screenPicture","id":7,"device":"{DEVICE}","monitor":"m","maxWidth":640,"maxHeight":400,"known":12,"cursor":true}}"#
+        ))
+        .unwrap();
+        assert_eq!(
+            request,
+            Request::ScreenPicture {
+                id: 7,
+                ask: ScreenAsk {
+                    device: DEVICE,
+                    monitor: "m".into(),
+                    max_width: 640,
+                    max_height: 400,
+                    known: 12,
+                    cursor: true,
+                },
+            }
+        );
+        let request: Request = serde_json::from_str(&format!(
+            r#"{{"type":"setScreensAllowed","device":"{DEVICE}","allowed":true}}"#
+        ))
+        .unwrap();
+        assert_eq!(
+            request,
+            Request::SetScreensAllowed {
+                device: DEVICE,
+                allowed: true,
+            }
+        );
+
+        let json = serde_json::to_value(PictureAnswer::Picture {
+            url: "data:image/jpeg;base64,AA==".into(),
+            width: 640,
+            height: 360,
+            fingerprint: 9,
+        })
+        .unwrap();
+        assert_eq!(json["status"], "picture");
+        assert_eq!(json["url"], "data:image/jpeg;base64,AA==");
+        assert_eq!(json["fingerprint"], 9);
+        for (answer, status) in [
+            (PictureAnswer::Unchanged, "unchanged"),
+            (PictureAnswer::NotAllowed, "notAllowed"),
+            (PictureAnswer::NeedsUpdate, "needsUpdate"),
+            (PictureAnswer::Unavailable, "unavailable"),
+            (PictureAnswer::Busy, "busy"),
+        ] {
+            assert_eq!(serde_json::to_value(answer).unwrap()["status"], status);
+        }
+    }
+
+    /// Both kinds of message share one line of text at a time.
+    #[test]
+    fn what_comes_from_the_agent_says_what_it_is() {
+        let picture = FromAgent::Picture(ScreenPicture {
+            id: 3,
+            answer: PictureAnswer::Busy,
+        });
+        let text = serde_json::to_string(&picture).unwrap();
+        assert_eq!(text, r#"{"picture":{"id":3,"answer":{"status":"busy"}}}"#);
+        assert_eq!(serde_json::from_str::<FromAgent>(&text).unwrap(), picture);
     }
 
     #[test]

@@ -20,6 +20,7 @@ tauri-build = { version = "2.7.4", features = [] }
 
 [dependencies]
 hk-daemon.workspace = true
+hk-core.workspace = true
 hk-ipc.workspace = true
 hk-platform.workspace = true
 serde.workspace = true
@@ -36,4 +37,3 @@ hk-win-service.workspace = true
 tauri-winrt-notification = "0.8"
 
 [dev-dependencies]
-hk-core.workspace = true

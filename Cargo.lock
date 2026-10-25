@@ -1767,6 +1767,7 @@ dependencies = [
  "hk-net",
  "hk-platform",
  "hk-proto",
+ "image",
  "serde",
  "serde_json",
  "tokio",
@@ -2122,6 +2123,8 @@ dependencies = [
  "num-traits",
  "png",
  "tiff",
+ "zune-core",
+ "zune-jpeg",
 ]
 
 [[package]]

@@ -10,6 +10,8 @@ export interface Appearance {
   appsOnScreens: boolean;
   /** Back, pause and forward, on the screens with something to play. */
   mediaButtons: boolean;
+  /** What's on each screen, for the PCs that allow it. */
+  screenPictures: boolean;
 }
 
 const STORAGE_KEY = "hackerman-appearance";
@@ -26,6 +28,7 @@ function saved(): Appearance {
     monitorStands: stored?.monitorStands !== false,
     appsOnScreens: stored?.appsOnScreens !== false,
     mediaButtons: stored?.mediaButtons !== false,
+    screenPictures: stored?.screenPictures !== false,
   };
 }
 

@@ -14,4 +14,5 @@ pub mod geometry;
 pub mod input;
 pub mod layout;
 pub mod rules;
+pub mod screens;
 pub mod switcher;

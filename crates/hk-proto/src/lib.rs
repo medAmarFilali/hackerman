@@ -36,8 +36,12 @@ pub const FEATURE_APPS: u32 = 1 << 2;
 /// Can be asked to play, pause and skip what's playing there.
 pub const FEATURE_MEDIA: u32 = 1 << 3;
 
+/// Can be asked for pictures of its screens, with a [`ScreenRequest`].
+pub const FEATURE_SCREENS: u32 = 1 << 4;
+
 /// Everything this version can do beyond the base protocol, for [`Message::Hello`].
-pub const FEATURES: u32 = FEATURE_FILES | FEATURE_SEND_FILES | FEATURE_APPS | FEATURE_MEDIA;
+pub const FEATURES: u32 =
+    FEATURE_FILES | FEATURE_SEND_FILES | FEATURE_APPS | FEATURE_MEDIA | FEATURE_SCREENS;
 
 /// A message sent from one peer to another.
 ///
@@ -143,6 +147,54 @@ pub enum FileAnswer {
     Refused(String),
 }
 
+/// Asks for a picture of one of the receiver's screens. Sent on a stream of its own, which
+/// the answer then comes back on, so one that's dropped costs nothing, and pictures are only
+/// ever taken for someone who's waiting for one. Needs [`FEATURE_SCREENS`].
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ScreenRequest {
+    pub monitor: String,
+    /// The picture has to fit in this. The receiver may make it smaller than this still.
+    pub max_width: u16,
+    pub max_height: u16,
+    /// The [`ScreenAnswer::Picture::fingerprint`] of the picture already here, or zero.
+    pub known: u32,
+    /// Whether to draw the cursor on it. Moving the cursor then counts as the picture
+    /// changing, which is a waste for one too small to make it out on.
+    pub cursor: bool,
+}
+
+/// The first thing back on the stream of a [`ScreenRequest`].
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ScreenAnswer {
+    /// The picture follows as a JPEG, until the stream ends.
+    Picture {
+        width: u16,
+        height: u16,
+        fingerprint: u32,
+    },
+    /// It's the same as the picture already there.
+    Unchanged,
+    /// The receiver's user hasn't allowed this device to see its screens.
+    NotAllowed,
+    /// There's nothing to show right now: that screen has gone, the receiver is locked, or
+    /// it has sharing turned off.
+    Unavailable,
+    /// Too many pictures are waiting to be taken, so ask again in a moment.
+    Busy,
+}
+
+/// What comes first on a stream asking for something, depending on what it's asking for.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PeerRequest {
+    File(FileRequest),
+    Screen(ScreenRequest),
+}
+
+/// What a [`ScreenRequest`] starts with. A [`FileRequest`] has no such thing at its start, as
+/// older versions send them. It can only begin like this with a copy counter of 72, where
+/// real ones are the time in milliseconds, and a device's fingerprint starting with the rest.
+const SCREEN_REQUEST_MARK: &[u8] = b"HKSCREEN";
+
 #[derive(Debug, thiserror::Error)]
 #[error("invalid message encoding")]
 pub struct CodecError(#[from] postcard::Error);
@@ -232,6 +284,27 @@ pub fn encode_file_request(request: &FileRequest) -> Result<Vec<u8>, CodecError>
 }
 
 pub fn decode_file_request(bytes: &[u8]) -> Result<FileRequest, CodecError> {
+    Ok(postcard::from_bytes(bytes)?)
+}
+
+pub fn encode_screen_request(request: &ScreenRequest) -> Result<Vec<u8>, CodecError> {
+    let mut bytes = SCREEN_REQUEST_MARK.to_vec();
+    bytes.extend(postcard::to_allocvec(request)?);
+    Ok(bytes)
+}
+
+pub fn decode_peer_request(bytes: &[u8]) -> Result<PeerRequest, CodecError> {
+    match bytes.strip_prefix(SCREEN_REQUEST_MARK) {
+        Some(request) => Ok(PeerRequest::Screen(postcard::from_bytes(request)?)),
+        None => Ok(PeerRequest::File(decode_file_request(bytes)?)),
+    }
+}
+
+pub fn encode_screen_answer(answer: &ScreenAnswer) -> Result<Vec<u8>, CodecError> {
+    Ok(postcard::to_allocvec(answer)?)
+}
+
+pub fn decode_screen_answer(bytes: &[u8]) -> Result<ScreenAnswer, CodecError> {
     Ok(postcard::from_bytes(bytes)?)
 }
 
@@ -332,6 +405,62 @@ mod tests {
             let bytes = encode_file_answer(&answer).unwrap();
             assert_eq!(decode_file_answer(&bytes).unwrap(), answer);
         }
+    }
+
+    #[test]
+    fn asking_for_a_picture_and_the_answers_round_trip() {
+        let request = ScreenRequest {
+            monitor: "\\\\?\\DISPLAY#LEN4".into(),
+            max_width: 640,
+            max_height: 400,
+            known: 0xDEAD_BEEF,
+            cursor: true,
+        };
+        let bytes = encode_screen_request(&request).unwrap();
+        assert_eq!(
+            decode_peer_request(&bytes).unwrap(),
+            PeerRequest::Screen(request)
+        );
+        for answer in [
+            ScreenAnswer::Picture {
+                width: 640,
+                height: 360,
+                fingerprint: 7,
+            },
+            ScreenAnswer::Unchanged,
+            ScreenAnswer::NotAllowed,
+            ScreenAnswer::Unavailable,
+            ScreenAnswer::Busy,
+        ] {
+            let bytes = encode_screen_answer(&answer).unwrap();
+            assert_eq!(decode_screen_answer(&bytes).unwrap(), answer);
+        }
+    }
+
+    /// Versions from before pictures send file requests with nothing marking them as such,
+    /// and they have to keep working.
+    #[test]
+    fn a_file_request_from_an_older_version_is_still_one() {
+        let request = FileRequest {
+            version: ClipVersion {
+                counter: 1_793_000_000_000,
+                owner: hk_core::device::Fingerprint::from_bytes([b'K'; 32]),
+            },
+            index: 3,
+            offset: 9,
+        };
+        let bytes = encode_file_request(&request).unwrap();
+        assert_eq!(
+            decode_peer_request(&bytes).unwrap(),
+            PeerRequest::File(request)
+        );
+    }
+
+    #[test]
+    fn a_request_making_no_sense_is_an_error_not_a_panic() {
+        assert!(decode_peer_request(b"").is_err());
+        assert!(decode_peer_request(b"HKSCREEN").is_err());
+        assert!(decode_peer_request(b"HKSCREEN\xff\xff\xff\xff\xff").is_err());
     }
 
     /// Exact copies of what version 0.4.0 sends and understands. These must never be

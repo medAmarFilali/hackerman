@@ -10,6 +10,7 @@ mod inject;
 mod keymap;
 mod media;
 mod rivals;
+mod screens;
 pub mod session;
 mod virtual_files;
 
@@ -25,6 +26,7 @@ use hk_core::clipboard::{ClipboardData, SharedFile};
 use hk_core::geometry::Point;
 use hk_core::input::InputEvent;
 use hk_core::layout::Monitor;
+use hk_core::screens::ScreenImage;
 use windows::Win32::System::Com::CoTaskMemFree;
 use windows::Win32::System::Threading::{
     GetCurrentProcess, PROCESS_POWER_THROTTLING_CURRENT_VERSION,
@@ -259,6 +261,14 @@ impl Platform for NativePlatform {
 
     fn rival_programs(&self) -> Vec<String> {
         rivals::running()
+    }
+
+    fn capture_screen(&self, monitor: &Monitor, with_cursor: bool) -> Result<ScreenImage, Error> {
+        // The system's helper can see what's on the lock screen, and nobody else should.
+        match self.role {
+            Role::Agent => screens::take(monitor, with_cursor),
+            Role::Helper { .. } => Err(Error::Screen("the screen is locked".to_string())),
+        }
     }
 }
 

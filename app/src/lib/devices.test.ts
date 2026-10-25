@@ -21,6 +21,8 @@ function device(fingerprint: string, status: DeviceStatus = "connected") {
     needsUpdateForFiles: false,
     canReceiveFiles: true,
     filesAllowed: false,
+  screensAllowed: false,
+  watchingScreens: false,
   };
 }
 

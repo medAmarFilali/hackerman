@@ -19,9 +19,12 @@ use hk_core::device::Fingerprint;
 use hk_core::rules::NameClash;
 use hk_net::{BlobChannel, DataReader, DataWriter, IncomingRequest};
 use hk_platform::FileSource;
-use hk_proto::{FileAnswer, FileRequest};
+use hk_proto::{FileAnswer, FileRequest, PeerRequest};
 use tokio::io::{AsyncReadExt, AsyncSeekExt};
 use tokio::runtime::Handle;
+use tokio::sync::mpsc::UnboundedSender;
+
+use crate::engine::Event;
 
 /// How much of a file to read and send at a time.
 const PIECE: usize = 1024 * 1024;
@@ -180,23 +183,48 @@ fn add(path: &Path, relative: &str, files: &mut Vec<SharedFile>, paths: &mut Vec
     }
 }
 
-/// Answers another device's requests for file content, until the connection goes.
-pub async fn serve(blobs: BlobChannel, offered: OfferedFiles) -> Result<()> {
+/// Answers another device's requests for what's here, until the connection goes. File content
+/// is answered from here, and anything needing a decision goes to the main loop.
+pub async fn serve(
+    peer: Fingerprint,
+    blobs: BlobChannel,
+    offered: OfferedFiles,
+    events: UnboundedSender<Event>,
+) -> Result<()> {
     loop {
         let request = blobs.next_request().await?;
         let offered = offered.clone();
+        let events = events.clone();
         tokio::spawn(async move {
-            if let Err(error) = answer(request, offered).await {
+            if let Err(error) = route(peer, request, offered, events).await {
                 // Usually only that the other side stopped reading.
-                tracing::debug!(%error, "supplying a file ended early");
+                tracing::debug!(%error, "answering another device ended early");
             }
         });
     }
 }
 
-async fn answer(incoming: IncomingRequest, offered: OfferedFiles) -> Result<()> {
-    let (request, mut writer) = incoming.read().await?;
-    let request = hk_proto::decode_file_request(&request)?;
+async fn route(
+    peer: Fingerprint,
+    incoming: IncomingRequest,
+    offered: OfferedFiles,
+    events: UnboundedSender<Event>,
+) -> Result<()> {
+    let (request, writer) = incoming.read().await?;
+    match hk_proto::decode_peer_request(&request)? {
+        PeerRequest::File(request) => answer(request, writer, offered).await,
+        PeerRequest::Screen(request) => {
+            let _ = events.send(Event::ScreenRequested {
+                peer,
+                request,
+                writer,
+            });
+            Ok(())
+        }
+    }
+}
+
+async fn answer(request: FileRequest, mut writer: DataWriter, offered: OfferedFiles) -> Result<()> {
     let Some(path) = offered.path(request.version, request.index as usize) else {
         return refuse(writer, "that file is no longer being shared").await;
     };

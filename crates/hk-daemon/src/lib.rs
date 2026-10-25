@@ -10,6 +10,7 @@ mod engine;
 mod files;
 pub mod lock_screen;
 mod pairing;
+mod screens;
 mod session;
 mod shared;
 

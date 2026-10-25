@@ -33,6 +33,7 @@ async fn main() -> Result<()> {
             options.capture = false;
             options.headless_pairing = true;
             let platform = FakePlatform::with_screens(screens);
+            platform.set_screens_moving(true);
             platform.set_running_apps(simulated_apps());
             run_until_stopped(options, platform).await
         }

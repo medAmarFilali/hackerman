@@ -6,15 +6,18 @@
 mod lock_screen;
 mod notifications;
 
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::collections::{HashMap, HashSet};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Mutex, MutexGuard, PoisonError};
 use std::time::Duration;
 
-use hk_ipc::{PairingStage, Request, UiState};
+use hk_core::device::Fingerprint;
+use hk_ipc::{FromAgent, PairingStage, PictureAnswer, Request, ScreenAsk, UiState};
 use tauri::menu::{Menu, MenuItem};
 use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
-use tauri::{AppHandle, Emitter, Manager, State, WindowEvent};
+use tauri::{AppHandle, Emitter, Manager, State, WebviewWindow, WindowEvent};
 use tokio::sync::mpsc::{self, UnboundedReceiver, UnboundedSender};
+use tokio::sync::oneshot;
 
 /// Tells this program to run as the background agent instead of the app.
 pub const AGENT_ARGUMENT: &str = "--agent";
@@ -31,6 +34,9 @@ const QUIT_TIMEOUT: Duration = Duration::from_secs(2);
 
 const TRAY_ID: &str = "main";
 
+/// How long to wait for a picture of a screen. The agent itself gives up on another PC by then.
+const PICTURE_TIMEOUT: Duration = Duration::from_secs(8);
+
 struct Bridge {
     requests: UnboundedSender<Request>,
     latest: Mutex<Option<UiState>>,
@@ -38,11 +44,48 @@ struct Bridge {
     quitting: AtomicBool,
     /// The tray menu's item for turning sharing on or off, once the tray exists.
     sharing_item: Mutex<Option<MenuItem<tauri::Wry>>>,
+    next_picture: AtomicU64,
+    /// Who's waiting for which picture.
+    pictures_waiting: Mutex<HashMap<u64, oneshot::Sender<PictureAnswer>>>,
+    /// Which PCs the user has been told are looking at this one's screens, since the app started.
+    told_about_watching: Mutex<HashSet<Fingerprint>>,
 }
 
 #[tauri::command]
 fn send_request(request: Request, bridge: State<'_, Bridge>) {
     let _ = bridge.requests.send(request);
+}
+
+/// A picture of a screen, here or on another PC. With the window out of sight there's nobody to
+/// show it to, and nothing gets taken, even if the page keeps asking.
+#[tauri::command]
+async fn screen_picture(
+    ask: ScreenAsk,
+    window: WebviewWindow,
+    bridge: State<'_, Bridge>,
+) -> Result<PictureAnswer, String> {
+    let in_sight = window.is_visible().unwrap_or(false) && !window.is_minimized().unwrap_or(true);
+    if !in_sight {
+        return Err("the window is out of sight".to_string());
+    }
+    let id = bridge.next_picture.fetch_add(1, Ordering::Relaxed);
+    let (answer_tx, answer_rx) = oneshot::channel();
+    lock(&bridge.pictures_waiting).insert(id, answer_tx);
+    if bridge
+        .requests
+        .send(Request::ScreenPicture { id, ask })
+        .is_err()
+    {
+        lock(&bridge.pictures_waiting).remove(&id);
+        return Err("the agent has gone".to_string());
+    }
+    let answer = tokio::time::timeout(PICTURE_TIMEOUT, answer_rx).await;
+    lock(&bridge.pictures_waiting).remove(&id);
+    match answer {
+        Ok(Ok(answer)) => Ok(answer),
+        // Lost contact with the agent, or it never answered. Asking again is all there is to do.
+        _ => Err("no answer".to_string()),
+    }
 }
 
 /// Shows a folder in File Explorer. This only ever opens a window on a folder.
@@ -97,6 +140,9 @@ pub fn run() {
             latest: Mutex::new(None),
             quitting: AtomicBool::new(false),
             sharing_item: Mutex::new(None),
+            next_picture: AtomicU64::new(1),
+            pictures_waiting: Mutex::new(HashMap::new()),
+            told_about_watching: Mutex::new(HashSet::new()),
         })
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_autostart::init(
@@ -105,6 +151,7 @@ pub fn run() {
         ))
         .invoke_handler(tauri::generate_handler![
             send_request,
+            screen_picture,
             current_state,
             open_folder,
             open_log_folder,
@@ -187,11 +234,11 @@ fn toggle_sharing(app: &AppHandle) {
     }
 }
 
-/// Makes the tray say whether sharing is on.
-fn show_sharing_in_tray(app: &AppHandle, enabled: bool) {
+/// Makes the tray say whether sharing is on, and who's looking at this PC's screens.
+fn show_sharing_in_tray(app: &AppHandle, state: &UiState) {
     let item = lock(&app.state::<Bridge>().sharing_item).clone();
     if let Some(item) = item {
-        let label = if enabled {
+        let label = if state.enabled {
             "Disable Hackerman"
         } else {
             "Enable Hackerman"
@@ -199,12 +246,7 @@ fn show_sharing_in_tray(app: &AppHandle, enabled: bool) {
         let _ = item.set_text(label);
     }
     if let Some(tray) = app.tray_by_id(TRAY_ID) {
-        let tooltip = if enabled {
-            "Hackerman"
-        } else {
-            "Hackerman (disabled)"
-        };
-        let _ = tray.set_tooltip(Some(tooltip));
+        let _ = tray.set_tooltip(Some(notifications::tray_tooltip(state)));
     }
 }
 
@@ -274,9 +316,13 @@ async fn follow_agent(app: AppHandle, mut requests: UnboundedReceiver<Request>) 
 
         loop {
             tokio::select! {
-                state = connection.recv::<UiState>() => match state {
-                    Ok(Some(state)) => {
-                        on_state(&app, state);
+                message = connection.recv::<FromAgent>() => match message {
+                    Ok(Some(FromAgent::State(state))) => on_state(&app, *state),
+                    Ok(Some(FromAgent::Picture(picture))) => {
+                        let waiting = lock(&app.state::<Bridge>().pictures_waiting).remove(&picture.id);
+                        if let Some(waiting) = waiting {
+                            let _ = waiting.send(picture.answer);
+                        }
                     }
                     Ok(None) | Err(_) => break,
                 },
@@ -289,6 +335,8 @@ async fn follow_agent(app: AppHandle, mut requests: UnboundedReceiver<Request>) 
             }
         }
 
+        // The answers to these are never coming now.
+        lock(&app.state::<Bridge>().pictures_waiting).clear();
         if is_quitting(&app) {
             app.exit(0);
             return;
@@ -322,8 +370,20 @@ fn on_state(app: &AppHandle, state: UiState) {
     if asking(&state).is_some() && asking(&state) != previous.as_ref().and_then(asking) {
         show_window(app);
     }
-    if previous.as_ref().map(|previous| previous.enabled) != Some(state.enabled) {
-        show_sharing_in_tray(app, state.enabled);
+    let tray_says = |state: &UiState| notifications::tray_tooltip(state);
+    if previous.as_ref().map(|previous| previous.enabled) != Some(state.enabled)
+        || previous.as_ref().map(tray_says) != Some(tray_says(&state))
+    {
+        show_sharing_in_tray(app, &state);
+    }
+    // Being looked at has to be noticed even with the window closed, but once is enough to know
+    // that it's going on. The tray and the window say so for as long as it is.
+    {
+        let bridge = app.state::<Bridge>();
+        let mut told = lock(&bridge.told_about_watching);
+        for news in notifications::newly_watching(&state, &mut told) {
+            notifications::show(app, news);
+        }
     }
     // Nothing's new in the first state.
     if let Some(previous) = &previous

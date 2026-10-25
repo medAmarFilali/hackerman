@@ -115,6 +115,10 @@ fn copy_devices(from: &Path, to: &Path, approved: &[Fingerprint]) -> Result<()> 
         return remove_if_there(&target);
     };
     devices.retain(|device| approved.contains(&device.fingerprint));
+    // What a locked PC is showing is nobody's business, whoever could see it unlocked.
+    for device in &mut devices {
+        device.screens_allowed = false;
+    }
     let bytes = serde_json::to_vec_pretty(&devices).context("can't format the devices")?;
     write_if_changed(&target, &bytes)
 }
@@ -326,6 +330,21 @@ mod tests {
     }
 
     /// Forgetting a device has to reach the helper, or it would still let that device in.
+    #[test]
+    fn the_helper_never_lets_a_device_see_the_screens() {
+        let (user, helper) = folders("screens");
+        with_everything(&user);
+        fs::write(
+            user.join("devices.json"),
+            format!(r#"[{{"fingerprint":"{APPROVED}","name":"desk","screens_allowed":true}}]"#),
+        )
+        .unwrap();
+        copy_settings(&user, &helper, &[APPROVED]).unwrap();
+        let copied = read_devices(&helper).unwrap().unwrap();
+        assert_eq!(copied.len(), 1);
+        assert!(!copied[0].screens_allowed);
+    }
+
     #[test]
     fn a_device_forgotten_by_the_user_goes_even_if_it_was_approved() {
         let (user, helper) = folders("forgotten");

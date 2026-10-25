@@ -29,9 +29,29 @@ export type Request =
   | { type: "setFilesAllowed"; device: Fingerprint; allowed: boolean }
   | { type: "mediaCommand"; device: Fingerprint; app: string; command: MediaCommand }
   | { type: "recordingShortcut"; active: boolean }
+  | { type: "setScreensAllowed"; device: Fingerprint; allowed: boolean }
   | { type: "shutdown" };
 
 export type MediaCommand = "playPause" | "back" | "forward";
+
+/** Which picture of which screen. */
+export interface ScreenAsk {
+  device: Fingerprint;
+  monitor: string;
+  maxWidth: number;
+  maxHeight: number;
+  /** The fingerprint of the picture already on show, or zero. */
+  known: number;
+  cursor: boolean;
+}
+
+export type PictureAnswer =
+  | { status: "picture"; url: string; width: number; height: number; fingerprint: number }
+  | { status: "unchanged" }
+  | { status: "notAllowed" }
+  | { status: "needsUpdate" }
+  | { status: "unavailable" }
+  | { status: "busy" };
 
 /** A key and the modifiers held with it. With no key, it's turned off. */
 export interface Shortcut {
@@ -130,6 +150,10 @@ export interface DeviceView {
   canReceiveFiles: boolean;
   /** It can send files here without asking. */
   filesAllowed: boolean;
+  /** It can see this PC's screens. */
+  screensAllowed: boolean;
+  /** It has just been looking at them. */
+  watchingScreens: boolean;
 }
 
 export interface ScreenView {

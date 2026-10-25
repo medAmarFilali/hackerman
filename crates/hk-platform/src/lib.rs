@@ -21,6 +21,7 @@ use hk_core::clipboard::{ClipboardData, SharedFile};
 use hk_core::geometry::Point;
 use hk_core::input::InputEvent;
 use hk_core::layout::Monitor;
+use hk_core::screens::ScreenImage;
 use hk_core::switcher::LocalEvent;
 
 pub use imp::{NativePlatform, native};
@@ -125,6 +126,13 @@ pub trait Platform: Clone + Send + Sync + 'static {
     fn rival_programs(&self) -> Vec<String> {
         Vec::new()
     }
+
+    /// What's on this monitor right now, as a picture. This takes a moment, so don't call it
+    /// where that would hold things up. It fails while the screen is locked, or anything else
+    /// protected is in front, rather than showing that.
+    fn capture_screen(&self, _monitor: &Monitor, _with_cursor: bool) -> Result<ScreenImage, Error> {
+        Err(Error::Unsupported)
+    }
 }
 
 /// Where the content of files on the clipboard comes from when they're elsewhere.
@@ -153,4 +161,6 @@ pub enum Error {
     Hook(String),
     #[error("media controls: {0}")]
     Media(String),
+    #[error("taking a picture of the screen: {0}")]
+    Screen(String),
 }

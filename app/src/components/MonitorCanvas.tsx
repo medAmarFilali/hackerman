@@ -5,6 +5,7 @@ import {
   Check,
   Download,
   FileUp,
+  Maximize2,
   Move,
   Pause,
   Play,
@@ -17,6 +18,7 @@ import {
 import { useEffect, useMemo, useRef, useState } from "react";
 
 import { DeviceIcon, NumberBadge, type Presence, ScreenStand } from "@/components/Art";
+import { ScreenViewer } from "@/components/ScreenViewer";
 import { Button } from "@/components/ui/button";
 import {
   type Crossing,
@@ -36,6 +38,7 @@ import {
 import { useAppearance } from "@/lib/appearance";
 import { activeDevice, cantReceiveFilesBecause, deviceNumbers, isBuiltIn } from "@/lib/devices";
 import { useFileDrag } from "@/lib/file-drag";
+import { pictureSizeFor, useScreenPicture } from "@/lib/screen-pictures";
 import type {
   AppView,
   DeviceView,
@@ -61,6 +64,10 @@ const MOVES = "transition-[left,top,width,height] duration-200 ease-out motion-r
 const SCREENS_CHANGED_FOR_MS = 10_000;
 /** What a tile's name and details at the top and bottom leave of its height, in pixels. */
 const TILE_TEXT_HEIGHT = 92;
+/** A screen shorter than this shows its picture rather than its size and name at the bottom. */
+const DETAILS_OVER_A_PICTURE_NEED_HEIGHT = 170;
+/** What that leaves room for. */
+const TILE_DETAILS_HEIGHT = 36;
 const APP_ICON_WIDTH = 24;
 const APP_ROW_HEIGHT = 24;
 const PLAYER_ROW_HEIGHT = 30;
@@ -70,6 +77,8 @@ const TILE_PADDING = 24;
 const PLAYER_NAME_NEEDS_WIDTH = 170;
 /** An app's icon and three buttons, with their gaps and the border around them. */
 const PLAYER_WIDTH_WITHOUT_NAME = 104;
+/** How often the small pictures on the canvas change. */
+const SMALL_PICTURE_EVERY_MS = 1000;
 
 function keyOf(screen: { device: Fingerprint; monitor: string }): string {
   return `${screen.device}/${screen.monitor}`;
@@ -149,6 +158,7 @@ export function MonitorCanvas({ state }: { state: UiState }) {
   const [dropped, setDropped] = useState<Map<string, ScreenView> | null>(null);
   const { laptopKeyboards, monitorStands } = useAppearance();
   const fileDrag = useFileDrag();
+  const [viewing, setViewing] = useState<string | null>(null);
 
   useEffect(() => {
     const element = area.current;
@@ -332,6 +342,11 @@ export function MonitorCanvas({ state }: { state: UiState }) {
     }
   }
 
+  const screenBeingViewed = state.screens.find((screen) => keyOf(screen) === viewing);
+  const nameOfDevice = (device: Fingerprint) =>
+    device === state.me.fingerprint
+      ? "This PC"
+      : (state.devices.find((d) => d.fingerprint === device)?.name ?? "Unknown");
 
   const connected = state.devices.filter((device) => device.status === "connected");
   const unreachable = state.enabled
@@ -420,6 +435,7 @@ export function MonitorCanvas({ state }: { state: UiState }) {
             onKeyDown={(event) => onKeyDown(event, screen)}
             onResizeStart={(event) => onResizeStart(event, screen)}
             onResetSize={() => resetSize(screen)}
+            onView={() => setViewing(key)}
           />
         );
       })}
@@ -492,6 +508,14 @@ export function MonitorCanvas({ state }: { state: UiState }) {
       )}
 
 
+      {screenBeingViewed && (
+        <ScreenViewer
+          screen={screenBeingViewed}
+          deviceName={nameOfDevice(screenBeingViewed.device)}
+          isThisPc={screenBeingViewed.device === state.me.fingerprint}
+          onClose={() => setViewing(null)}
+        />
+      )}
     </div>
   );
 }
@@ -608,6 +632,7 @@ interface MonitorTileProps {
   onKeyDown: (event: React.KeyboardEvent) => void;
   onResizeStart: (event: React.PointerEvent) => void;
   onResetSize: () => void;
+  onView: () => void;
 }
 
 function MonitorTile({
@@ -629,10 +654,30 @@ function MonitorTile({
   onKeyDown,
   onResizeStart,
   onResetSize,
+  onView,
 }: MonitorTileProps) {
   const active = presence === "active";
   const away = presence === "away";
   const label = `${screen.name}, ${deviceName}${model ? `, ${model}` : ""}, PC number ${number}, ${screen.pixelWidth} by ${screen.pixelHeight}${active ? ", has the keyboard and mouse" : ""}${away ? `, ${awayReason}` : ""}. Use the arrow keys to move it, plus and minus to resize it, and Enter to see what's on it.`;
+  const { screenPictures } = useAppearance();
+  const canView = screenPictures && !away;
+  // Each starts at a different moment, so that they don't all ask at once. It's chosen once, as
+  // choosing again would start them all over.
+  const [startAfter] = useState(() => Math.random() * SMALL_PICTURE_EVERY_MS);
+  const pictureWidth = screen.width * view.scale;
+  const pictureHeight = screen.height * view.scale;
+  const size = pictureSizeFor(pictureWidth, pictureHeight, window.devicePixelRatio || 1);
+  const picture = useScreenPicture(
+    canView
+      ? { device: screen.device, monitor: screen.monitor, ...size, cursor: false }
+      : null,
+    SMALL_PICTURE_EVERY_MS,
+    startAfter,
+  );
+  const hasPicture = picture.kind === "picture";
+  // Over a picture, the words need something behind them to be read at all.
+  const onPicture = hasPicture && "rounded bg-card/85 px-1 py-0.5 backdrop-blur-sm";
+  const hideDetails = hasPicture && pictureHeight < DETAILS_OVER_A_PICTURE_NEED_HEIGHT;
   return (
     <div
       role="button"
@@ -645,7 +690,16 @@ function MonitorTile({
       onPointerMove={onPointerMove}
       onPointerUp={onPointerUp}
       onPointerCancel={onPointerUp}
-      onKeyDown={onKeyDown}
+      onKeyDown={(event) => {
+        if (event.key === "Enter" && canView) {
+          onView();
+        } else {
+          onKeyDown(event);
+        }
+      }}
+      onDoubleClick={() => {
+        if (canView) onView();
+      }}
       style={pixelsOf(screen, view)}
       className={cn(
         "frame absolute cursor-grab outline-none focus-visible:ring-3 focus-visible:ring-ring/50",
@@ -658,11 +712,20 @@ function MonitorTile({
         filesOver && cantReceive && "ring-2 ring-destructive/60",
       )}
     >
-      <div className={cn("frame-inner h-full overflow-hidden", away && "opacity-60")}>
-        <div className="@container flex h-full flex-col justify-between gap-1 p-2 text-foreground">
-          <div className="flex min-w-0 items-start gap-2">
+      <div className={cn("frame-inner relative h-full overflow-hidden", away && "opacity-60")}>
+        {hasPicture && (
+          <img
+            src={picture.url}
+            alt=""
+            data-screen-picture
+            draggable={false}
+            className="pointer-events-none absolute inset-0 size-full object-fill"
+          />
+        )}
+        <div className="@container relative flex h-full flex-col justify-between gap-1 p-2 text-foreground">
+          <div className={cn("flex min-w-0 items-start gap-2", canView && "pe-5")}>
             <DeviceIcon laptop={isBuiltIn(screen)} active={active} className="hidden @[11rem]:flex" />
-            <div className="min-w-0">
+            <div className={cn("min-w-0", onPicture)}>
               <div className="truncate text-xs font-medium">{deviceName}</div>
               {model && (
                 <div
@@ -678,8 +741,15 @@ function MonitorTile({
             screen={screen}
             view={view}
             deviceName={deviceName}
+            extraRoom={hideDetails ? TILE_DETAILS_HEIGHT : 0}
           />
-          <div className="eyebrow hidden min-w-0 pe-3 @[6rem]:block">
+          <div
+            className={cn(
+              "eyebrow hidden w-fit max-w-full min-w-0 pe-3 @[6rem]:block",
+              onPicture,
+              hideDetails && "@[6rem]:hidden",
+            )}
+          >
             <div className="flex min-w-0 items-center gap-1">
               {screen.primary && (
                 <Star aria-label="Main display" className="size-2 shrink-0 fill-current" />
@@ -696,6 +766,21 @@ function MonitorTile({
         </div>
       </div>
       {filesOver && <DropMessage name={deviceName} cantReceive={cantReceive} />}
+      {canView && (
+        <Button
+          size="icon-xs"
+          variant="secondary"
+          title="See this screen larger"
+          aria-label={`See ${screen.name} on ${deviceName} larger`}
+          className="absolute top-1.5 right-3.5 z-[6] size-5 opacity-70 hover:opacity-100"
+          onPointerDown={(event) => event.stopPropagation()}
+          onDoubleClick={(event) => event.stopPropagation()}
+          onKeyDown={(event) => event.stopPropagation()}
+          onClick={onView}
+        >
+          <Maximize2 strokeWidth={1.5} />
+        </Button>
+      )}
       <NumberBadge
         number={number}
         active={active}
@@ -705,7 +790,11 @@ function MonitorTile({
         data-resize-handle
         title="Drag to resize. Double-click for the usual size."
         onPointerDown={onResizeStart}
-        onDoubleClick={onResetSize}
+        onDoubleClick={(event) => {
+          // Otherwise this would open the screen as well.
+          event.stopPropagation();
+          onResetSize();
+        }}
         className="group/handle absolute right-0 bottom-0 size-4 cursor-nwse-resize"
       >
         <span
@@ -722,14 +811,16 @@ function AppsOnScreen({
   screen,
   view,
   deviceName,
+  extraRoom,
 }: {
   screen: ScreenView;
   view: View;
   deviceName: string;
+  extraRoom: number;
 }) {
   const { appsOnScreens, mediaButtons } = useAppearance();
   const width = screen.width * view.scale;
-  const room = screen.height * view.scale - TILE_TEXT_HEIGHT;
+  const room = screen.height * view.scale - TILE_TEXT_HEIGHT + extraRoom;
   const players = mediaButtons ? screen.apps.filter((app) => app.media) : [];
   const others = appsOnScreens ? screen.apps.filter((app) => !players.includes(app)) : [];
   // The buttons come first. The apps get a row of their own if there's one left, and otherwise
@@ -848,6 +939,7 @@ function Player({
     <div
       data-player={app.id}
       onPointerDown={(event) => event.stopPropagation()}
+      onDoubleClick={(event) => event.stopPropagation()}
       onKeyDown={(event) => event.stopPropagation()}
       className="flex w-fit max-w-full min-w-0 cursor-default items-center gap-1 rounded-lg border bg-card py-0.5 ps-1 pe-0.5"
     >

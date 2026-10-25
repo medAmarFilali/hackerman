@@ -39,7 +39,7 @@ pub async fn run<P: Platform>(
         result = send_loop(sender, outgoing) => result,
         result = receive_loop(id, peer, receiver, &platform, &accepts_input, &events, &mut held) => result,
         result = receive_blobs(peer, blobs.clone(), &events) => result,
-        result = files::serve(blobs, offered_files) => result,
+        result = files::serve(peer, blobs, offered_files, events.clone()) => result,
     };
     if let Err(error) = result {
         tracing::info!(%peer, %error, "connection ended");

@@ -22,18 +22,18 @@ use hk_core::rules::ReceiveFiles;
 use hk_core::rules::Rules;
 use hk_core::switcher::Switcher;
 use hk_ipc::{
-    AppView, ControlView, DeviceStatus, DeviceView, IncomingFilesView, IpcConnection, IpcListener,
-    PairingStage, PairingView, Request, ScreenView, ThisDevice, TransferStage, TransferView,
-    UiState,
+    AppView, ControlView, DeviceStatus, DeviceView, FromAgent, IncomingFilesView, IpcConnection,
+    IpcListener, PairingStage, PairingView, PictureAnswer, Request, ScreenAsk, ScreenPicture,
+    ScreenView, ThisDevice, TransferStage, TransferView, UiState,
 };
 use hk_net::{
-    Accepted, BlobChannel, Discovery, DiscoveryEvent, Endpoint, FoundDevice, Identity, Link,
-    MAX_BLOB_LEN, PairingChannel, TrustStore, generate_code, local_addresses,
+    Accepted, BlobChannel, DataWriter, Discovery, DiscoveryEvent, Endpoint, FoundDevice, Identity,
+    Link, MAX_BLOB_LEN, PairingChannel, TrustStore, generate_code, local_addresses,
 };
 use hk_platform::{Capture, FileSource, Platform};
 use hk_proto::{
-    ClipboardBlob, FEATURE_APPS, FEATURE_FILES, FEATURE_MEDIA, FEATURE_SEND_FILES, FEATURES,
-    Message, PROTOCOL_VERSION, TransferUpdate,
+    ClipboardBlob, FEATURE_APPS, FEATURE_FILES, FEATURE_MEDIA, FEATURE_SCREENS, FEATURE_SEND_FILES,
+    FEATURES, Message, PROTOCOL_VERSION, ScreenAnswer, ScreenRequest, TransferUpdate,
 };
 use tokio::runtime::Handle;
 use tokio::sync::mpsc::{self, UnboundedReceiver, UnboundedSender};
@@ -46,6 +46,7 @@ use crate::files::{
     self, Links, LocalFiles, OfferedFiles, RemoteFiles, SaveError, TransferControl,
 };
 use crate::pairing::{self, Paired};
+use crate::screens;
 use crate::session;
 use crate::shared::Shared;
 
@@ -84,6 +85,9 @@ const RIVALS_CHECK_EVERY_N_TICKS: u64 = 30;
 const HELD_UP_AFTER: Duration = Duration::from_secs(5);
 /// How long a player takes to change what it says it's doing, after being asked to.
 const MEDIA_SETTLES: Duration = Duration::from_millis(300);
+/// A device that asked for a picture this recently counts as looking at this one's screens. It's
+/// long enough for pictures that come a few seconds apart.
+const WATCHING_FOR: Duration = Duration::from_secs(10);
 
 pub struct Options {
     /// Where to keep settings, the identity and saved data.
@@ -103,8 +107,20 @@ pub struct Options {
 
 /// Something that happened, for the main loop to act on.
 pub enum Event {
-    AppConnected(UnboundedSender<UiState>),
+    AppConnected(UnboundedSender<FromAgent>),
     AppRequest(Request),
+    /// The app wants a picture of a screen, here or on another device.
+    ScreenAsked {
+        id: u64,
+        ask: ScreenAsk,
+        reply: UnboundedSender<FromAgent>,
+    },
+    /// Another device wants a picture of a screen here.
+    ScreenRequested {
+        peer: Fingerprint,
+        request: ScreenRequest,
+        writer: DataWriter,
+    },
     Discovery(DiscoveryEvent),
     Incoming(Box<Accepted>),
     Dialed {
@@ -327,7 +343,7 @@ struct Engine<P: Platform> {
     discovery: Option<Discovery>,
     shared: Shared<P>,
     events: UnboundedSender<Event>,
-    apps: Vec<UnboundedSender<UiState>>,
+    apps: Vec<UnboundedSender<FromAgent>>,
     last_state: Option<UiState>,
     ticks: u64,
     last_tick: Instant,
@@ -349,6 +365,10 @@ struct Engine<P: Platform> {
     last_media_target: Option<AppOn>,
     /// Other programs here that share the keyboard and mouse too.
     rivals: Vec<String>,
+    /// Keeps pictures of the screens here from being taken all at once.
+    picture_limits: screens::Limits,
+    /// Which devices have been asking for pictures of the screens here, and when they last did.
+    watchers: BTreeMap<Fingerprint, Instant>,
     // These keep input capture and clipboard watching running.
     capture: Option<Capture>,
     _clipboard_watcher: Option<Capture>,
@@ -490,6 +510,8 @@ pub async fn run<P: Platform>(options: Options, platform: P) -> Result<()> {
         playing_since: BTreeMap::new(),
         last_media_target: None,
         rivals: Vec::new(),
+        picture_limits: screens::Limits::new(),
+        watchers: BTreeMap::new(),
         capture,
         _clipboard_watcher: clipboard_watcher,
     };
@@ -576,21 +598,30 @@ fn spawn_ipc_listener(mut listener: IpcListener, events: UnboundedSender<Event>)
 
 /// Passes requests from one app window to the main loop, and state back.
 async fn serve_app(mut connection: IpcConnection, events: UnboundedSender<Event>) {
-    let (state_tx, mut state_rx) = mpsc::unbounded_channel();
-    if events.send(Event::AppConnected(state_tx)).is_err() {
+    let (to_app_tx, mut to_app_rx) = mpsc::unbounded_channel();
+    if events.send(Event::AppConnected(to_app_tx.clone())).is_err() {
         return;
     }
     loop {
         tokio::select! {
-            state = state_rx.recv() => {
-                let Some(state) = state else { return };
-                if connection.send(&state).await.is_err() {
+            message = to_app_rx.recv() => {
+                let Some(message) = message else { return };
+                if connection.send(&message).await.is_err() {
                     return;
                 }
             }
             request = connection.recv::<Request>() => match request {
                 Ok(Some(request)) => {
-                    if events.send(Event::AppRequest(request)).is_err() {
+                    // A picture goes back only to the app that asked for it.
+                    let event = match request {
+                        Request::ScreenPicture { id, ask } => Event::ScreenAsked {
+                            id,
+                            ask,
+                            reply: to_app_tx.clone(),
+                        },
+                        request => Event::AppRequest(request),
+                    };
+                    if events.send(event).is_err() {
                         return;
                     }
                 }
@@ -691,6 +722,7 @@ impl<P: Platform> Engine<P> {
             );
         }
         self.read_apps();
+        self.forget_old_watchers();
         let monitors = self.shared.platform.monitors();
         if monitors != self.monitors {
             tracing::info!(count = monitors.len(), "monitors changed");
@@ -705,13 +737,19 @@ impl<P: Platform> Engine<P> {
 
     fn on_event(&mut self, event: Event) {
         match event {
-            Event::AppConnected(state) => {
-                let _ = state.send(self.ui_state());
-                self.apps.push(state);
+            Event::AppConnected(app) => {
+                let _ = app.send(FromAgent::State(Box::new(self.ui_state())));
+                self.apps.push(app);
                 // An app that stopped in the middle of choosing one would leave them off.
                 self.shared.switcher().set_shortcuts_paused(false);
             }
             Event::AppRequest(request) => self.on_request(request),
+            Event::ScreenAsked { id, ask, reply } => self.on_screen_asked(id, ask, reply),
+            Event::ScreenRequested {
+                peer,
+                request,
+                writer,
+            } => self.on_screen_requested(peer, request, writer),
             Event::Discovery(DiscoveryEvent::Found(found)) => {
                 let device = found.fingerprint;
                 self.discovered.insert(device, found);
@@ -902,6 +940,11 @@ impl<P: Platform> Engine<P> {
             Request::RecordingShortcut { active } => {
                 self.shared.switcher().set_shortcuts_paused(active);
             }
+            Request::SetScreensAllowed { device, allowed } => {
+                self.set_screens_allowed(device, allowed);
+            }
+            // Handled on the way here, to say where the answer goes.
+            Request::ScreenPicture { .. } => {}
             Request::Shutdown => {} // Handled by the main loop.
         }
     }
@@ -933,6 +976,7 @@ impl<P: Platform> Engine<P> {
             self.shared.apply(actions);
             self.capture_error = None;
             self.controlled_by = None;
+            self.watchers.clear();
         }
         self.check_fullscreen();
         self.broadcast(&Message::Enabled(enabled));
@@ -1224,6 +1268,122 @@ impl<P: Platform> Engine<P> {
             std::thread::sleep(MEDIA_SETTLES);
             let _ = events.send(Event::RefreshApps);
         });
+    }
+
+    // Pictures of the screens
+
+    /// The app wants a picture of a screen. One here is only a matter of taking it.
+    fn on_screen_asked(&mut self, id: u64, ask: ScreenAsk, reply: UnboundedSender<FromAgent>) {
+        let answer_now = |answer: PictureAnswer| {
+            let _ = reply.send(FromAgent::Picture(ScreenPicture { id, answer }));
+        };
+        if ask.device == self.me {
+            let Some(monitor) = self.monitors.iter().find(|m| m.id == ask.monitor).cloned() else {
+                return answer_now(PictureAnswer::Unavailable);
+            };
+            let Some(place) = self.picture_limits.join() else {
+                return answer_now(PictureAnswer::Busy);
+            };
+            let platform = self.shared.platform.clone();
+            let limits = self.picture_limits.clone();
+            tokio::spawn(async move {
+                let answer = screens::answer_local(platform, monitor, ask, limits, place).await;
+                let _ = reply.send(FromAgent::Picture(ScreenPicture { id, answer }));
+            });
+            return;
+        }
+        // A PC with sharing turned off has nothing to do with the others.
+        let session = self
+            .sessions
+            .get(&ask.device)
+            .filter(|session| session.up && self.settings.enabled);
+        let Some(session) = session.filter(|_| !self.peers_off.contains(&ask.device)) else {
+            return answer_now(PictureAnswer::Unavailable);
+        };
+        if session.features & FEATURE_SCREENS == 0 {
+            return answer_now(PictureAnswer::NeedsUpdate);
+        }
+        let blobs = session.blobs.clone();
+        tokio::spawn(async move {
+            let answer = screens::ask_peer(blobs, ask).await;
+            let _ = reply.send(FromAgent::Picture(ScreenPicture { id, answer }));
+        });
+    }
+
+    /// Another device wants a picture of a screen here. It only gets one if the user here has
+    /// said so for that device, and each one it gets counts as it looking at this PC.
+    fn on_screen_requested(
+        &mut self,
+        peer: Fingerprint,
+        request: ScreenRequest,
+        writer: DataWriter,
+    ) {
+        let allowed = self.paired.get(&peer).is_some_and(|d| d.screens_allowed);
+        let monitor = self.monitors.iter().find(|m| m.id == request.monitor);
+        let refusal = if !allowed {
+            Some(ScreenAnswer::NotAllowed)
+        } else if !self.settings.enabled || monitor.is_none() {
+            Some(ScreenAnswer::Unavailable)
+        } else {
+            None
+        };
+        let place = refusal
+            .is_none()
+            .then(|| self.picture_limits.join())
+            .flatten();
+        let Some(place) = place else {
+            let answer = refusal.unwrap_or(ScreenAnswer::Busy);
+            tokio::spawn(async move {
+                if let Err(error) = screens::refuse(writer, answer).await {
+                    tracing::debug!(%error, "turning down a request for a picture ended early");
+                }
+            });
+            return;
+        };
+        let Some(monitor) = monitor.cloned() else {
+            return;
+        };
+        if self.watchers.insert(peer, Instant::now()).is_none() {
+            tracing::info!(%peer, "another device started looking at this computer's screens");
+            self.notify();
+        }
+        let platform = self.shared.platform.clone();
+        let limits = self.picture_limits.clone();
+        tokio::spawn(async move {
+            let answered =
+                screens::answer_peer(platform, monitor, request, writer, limits, place).await;
+            if let Err(error) = answered {
+                // Usually only that the other side stopped reading.
+                tracing::debug!(%error, "sending a picture ended early");
+            }
+        });
+    }
+
+    fn set_screens_allowed(&mut self, device: Fingerprint, allowed: bool) {
+        let Some(paired) = self.paired.get_mut(&device) else {
+            return;
+        };
+        paired.screens_allowed = allowed;
+        self.save_devices();
+        if !allowed {
+            self.watchers.remove(&device);
+        }
+        tracing::info!(%device, allowed, "changed who can see this computer's screens");
+        self.notify();
+    }
+
+    fn forget_old_watchers(&mut self) {
+        let before = self.watchers.len();
+        self.watchers.retain(|peer, last| {
+            let still = last.elapsed() < WATCHING_FOR;
+            if !still {
+                tracing::info!(%peer, "another device stopped looking at this computer's screens");
+            }
+            still
+        });
+        if self.watchers.len() != before {
+            self.notify();
+        }
     }
 
     fn apps_on(&self, device: Fingerprint, monitor: &Monitor) -> Vec<AppView> {
@@ -2108,6 +2268,7 @@ impl<P: Platform> Engine<P> {
         self.peer_apps.remove(&device);
         self.icon_urls.retain(|(owner, _), _| *owner != device);
         self.media_changed();
+        self.watchers.remove(&device);
     }
 
     fn broadcast(&self, message: &Message) {
@@ -2288,6 +2449,7 @@ impl<P: Platform> Engine<P> {
                         model: None,
                         monitors: Vec::new(),
                         files_allowed: false,
+                        screens_allowed: false,
                     },
                 );
                 self.save_devices();
@@ -2317,7 +2479,7 @@ impl<P: Platform> Engine<P> {
             return;
         }
         for app in &self.apps {
-            let _ = app.send(state.clone());
+            let _ = app.send(FromAgent::State(Box::new(state.clone())));
         }
         self.last_state = Some(state);
     }
@@ -2447,6 +2609,8 @@ impl<P: Platform> Engine<P> {
                         .get(&device.fingerprint)
                         .is_some_and(|session| session.features & FEATURE_SEND_FILES != 0),
                 files_allowed: device.files_allowed,
+                screens_allowed: device.screens_allowed,
+                watching_screens: self.watchers.contains_key(&device.fingerprint),
             }
         });
         let available = self
@@ -2462,6 +2626,8 @@ impl<P: Platform> Engine<P> {
                 needs_update_for_files: false,
                 can_receive_files: false,
                 files_allowed: false,
+                screens_allowed: false,
+                watching_screens: false,
             });
         paired.chain(available).collect()
     }

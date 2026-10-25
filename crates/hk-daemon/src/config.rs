@@ -109,6 +109,9 @@ pub struct PairedDevice {
     /// The user said it can send files here without asking.
     #[serde(default)]
     pub files_allowed: bool,
+    /// The user said it can see this computer's screens.
+    #[serde(default)]
+    pub screens_allowed: bool,
 }
 
 pub fn load_devices(dir: &Path) -> Result<Vec<PairedDevice>> {
@@ -199,6 +202,7 @@ mod tests {
         let devices: Vec<PairedDevice> =
             serde_json::from_str(&format!(r#"[{{"fingerprint":"{id}","name":"old"}}]"#)).unwrap();
         assert!(!devices[0].files_allowed);
+        assert!(!devices[0].screens_allowed);
     }
 
     #[test]

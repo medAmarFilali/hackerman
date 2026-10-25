@@ -1,6 +1,7 @@
 import { open as chooseFolder } from "@tauri-apps/plugin-dialog";
 import { disable as stopAutostart, enable as startAutostart, isEnabled } from "@tauri-apps/plugin-autostart";
 import {
+  Eye,
   FolderOpen,
   Info,
   Keyboard,
@@ -98,6 +99,7 @@ type SectionId =
   | "cursor"
   | "files"
   | "media"
+  | "screens"
   | "appearance"
   | "shortcuts"
   | "about";
@@ -107,6 +109,7 @@ const SECTIONS: { id: SectionId; label: string; icon: LucideIcon }[] = [
   { id: "cursor", label: "Cursor", icon: MousePointer2 },
   { id: "files", label: "Clipboard & files", icon: Paperclip },
   { id: "media", label: "Apps & media", icon: Music },
+  { id: "screens", label: "Screens", icon: Eye },
   { id: "appearance", label: "Appearance", icon: Palette },
   { id: "shortcuts", label: "Shortcuts", icon: Keyboard },
   { id: "about", label: "About", icon: Info },
@@ -167,6 +170,7 @@ export function SettingsDialog({ state }: { state: UiState }) {
                 {section === "cursor" && <Cursor rules={rules} update={update} />}
                 {section === "files" && <Files state={state} update={update} />}
                 {section === "media" && <AppsAndMedia rules={rules} update={update} />}
+                {section === "screens" && <Screens state={state} />}
                 {section === "appearance" && <Appearance />}
                 {section === "shortcuts" && <Shortcuts state={state} update={update} />}
                 {section === "about" && <About state={state} />}
@@ -605,6 +609,54 @@ function AppsAndMedia({
         onChange={(mediaControl) => update({ mediaControl })}
       />
     </>
+  );
+}
+
+function Screens({ state }: { state: UiState }) {
+  const { screenPictures } = useAppearance();
+  const paired = state.devices.filter((device) => device.status !== "available");
+  return (
+    <>
+      <SwitchRow
+        label="Show what's on the screens"
+        description="Shows a live picture of each screen on the canvas, for this PC and the PCs that allow it. Pictures are only taken while this window is open."
+        checked={screenPictures}
+        onChange={(on) => changeAppearance({ screenPictures: on })}
+      />
+      <div className="flex flex-col gap-2">
+        <div className="flex flex-col gap-0.5">
+          <span className="text-sm font-medium">PCs that can see this PC's screens</span>
+          <span className="text-xs text-muted-foreground">
+            {paired.length === 0
+              ? "Pair with another PC first."
+              : "Anything on the screens can be seen, including passwords being typed in plain text and private messages. Hackerman says so when one of them is looking. Nothing can be seen while this PC is locked."}
+          </span>
+        </div>
+        {paired.map((device) => (
+          <ScreenPermission key={device.fingerprint} device={device} />
+        ))}
+      </div>
+    </>
+  );
+}
+
+function ScreenPermission({ device }: { device: UiState["devices"][number] }) {
+  const id = useId();
+  return (
+    <div className="flex items-center justify-between gap-3 rounded-md border px-2.5 py-1.5">
+      <Label htmlFor={id} title={device.name} className="min-w-0 truncate text-xs font-medium">
+        {device.name}
+      </Label>
+      <Switch
+        id={id}
+        aria-label={`Let ${device.name} see this PC's screens`}
+        checked={device.screensAllowed}
+        onCheckedChange={(allowed) =>
+          send({ type: "setScreensAllowed", device: device.fingerprint, allowed })
+        }
+        className="data-checked:bg-signal"
+      />
+    </div>
   );
 }
 

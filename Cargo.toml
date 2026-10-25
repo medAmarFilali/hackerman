@@ -22,6 +22,7 @@ anyhow = "1.0.104"
 arboard = "3.7.0"
 base64 = "0.22.1"
 if-addrs = "0.15.0"
+image = { version = "0.25.10", default-features = false, features = ["jpeg"] }
 keyboard-types = "0.8.3"
 mdns-sd = "0.21.6"
 png = "0.18.1"

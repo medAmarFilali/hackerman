@@ -2,7 +2,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { create } from "zustand";
 
-import type { LockScreenStatus, Request, UiState } from "@/lib/types";
+import type { LockScreenStatus, PictureAnswer, Request, ScreenAsk, UiState } from "@/lib/types";
 
 interface AppStore {
   /** The latest state from the background agent, once it has sent one. */
@@ -18,6 +18,11 @@ export const useApp = create<AppStore>(() => ({
 
 export function send(request: Request): void {
   void invoke("send_request", { request });
+}
+
+/** A picture of a screen. Fails if the window is out of sight, or the agent doesn't answer. */
+export function askForPicture(ask: ScreenAsk): Promise<PictureAnswer> {
+  return invoke("screen_picture", { ask });
 }
 
 /** Shows a folder in File Explorer. */

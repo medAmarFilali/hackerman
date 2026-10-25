@@ -9,6 +9,7 @@ use hk_core::clipboard::{ClipboardData, SharedFile};
 use hk_core::geometry::{Point, Rect};
 use hk_core::input::InputEvent;
 use hk_core::layout::Monitor;
+use hk_core::screens::ScreenImage;
 use hk_core::switcher::LocalEvent;
 
 use crate::{Capture, Error, FileSource, InputHandler, Platform};
@@ -37,6 +38,13 @@ struct State {
     icons_asked_for: Vec<String>,
     media_commands: Vec<(String, MediaCommand)>,
     rivals: Vec<String>,
+    /// What each monitor is showing, if a test has said. Others show a test pattern.
+    screen_pictures: Vec<(String, ScreenImage)>,
+    screens_locked: bool,
+    /// Which monitors have had their pictures taken so far, and whether with the cursor.
+    screen_captures: Vec<(String, bool)>,
+    /// Makes each picture differ from the one before, like a screen that's in use.
+    screens_moving: bool,
 }
 
 type ClipboardWatcher = Box<dyn FnMut() + Send>;
@@ -212,6 +220,28 @@ impl FakePlatform {
         self.state().rivals = rivals;
     }
 
+    /// Simulates this picture being what's on a monitor.
+    pub fn set_screen_picture(&self, monitor: &str, image: ScreenImage) {
+        let mut state = self.state();
+        state.screen_pictures.retain(|(id, _)| id != monitor);
+        state.screen_pictures.push((monitor.to_string(), image));
+    }
+
+    /// Simulates the screen locking, so that no pictures can be taken.
+    pub fn set_screens_locked(&self, locked: bool) {
+        self.state().screens_locked = locked;
+    }
+
+    /// Makes each picture of a screen differ from the one before.
+    pub fn set_screens_moving(&self, moving: bool) {
+        self.state().screens_moving = moving;
+    }
+
+    /// Which monitors have had their pictures taken so far, and whether with the cursor.
+    pub fn screen_captures(&self) -> Vec<(String, bool)> {
+        self.state().screen_captures.clone()
+    }
+
     pub fn cursor_hidden(&self) -> bool {
         self.state().cursor_hidden
     }
@@ -327,5 +357,67 @@ impl Platform for FakePlatform {
 
     fn rival_programs(&self) -> Vec<String> {
         self.state().rivals.clone()
+    }
+
+    fn capture_screen(&self, monitor: &Monitor, with_cursor: bool) -> Result<ScreenImage, Error> {
+        let mut state = self.state();
+        if state.screens_locked {
+            return Err(Error::Screen("the screen is locked".to_string()));
+        }
+        state
+            .screen_captures
+            .push((monitor.id.clone(), with_cursor));
+        let frame = if state.screens_moving {
+            state.screen_captures.len()
+        } else {
+            0
+        };
+        Ok(state
+            .screen_pictures
+            .iter()
+            .find(|(id, _)| *id == monitor.id)
+            .map_or_else(
+                || test_pattern(monitor, frame),
+                |(_, picture)| picture.clone(),
+            ))
+    }
+}
+
+/// Something to look at for a simulated screen: bands of colour that differ from one monitor to
+/// another, a grid to show up poor scaling, and a bar that moves along with `frame`.
+fn test_pattern(monitor: &Monitor, frame: usize) -> ScreenImage {
+    let (width, height) = (
+        monitor.bounds.width.max(1.0) as usize,
+        monitor.bounds.height.max(1.0) as usize,
+    );
+    let tint = monitor
+        .id
+        .bytes()
+        .fold(0usize, |sum, byte| sum + byte as usize)
+        * 37;
+    let bar = frame * 16 % width;
+    let mut bgra = vec![255; width * height * 4];
+    for (y, row) in bgra.chunks_exact_mut(width * 4).enumerate() {
+        for (x, pixel) in row.as_chunks_mut::<4>().0.iter_mut().enumerate() {
+            let grid = x % 120 < 2 || y % 120 < 2;
+            let in_bar = x >= bar && x < bar + 24;
+            let (blue, green, red) = if in_bar || grid {
+                (240, 240, 240)
+            } else {
+                (
+                    ((tint + x / 8) % 200 + 30) as u8,
+                    ((tint / 2 + y / 6) % 160 + 40) as u8,
+                    ((tint / 3 + (x + y) / 16) % 180 + 30) as u8,
+                )
+            };
+            pixel[0] = blue;
+            pixel[1] = green;
+            pixel[2] = red;
+        }
+    }
+    ScreenImage {
+        width: width as u32,
+        height: height as u32,
+        bgra,
     }
 }
