@@ -16,7 +16,7 @@ use std::io::Read;
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use hk_core::apps::{MediaCommand, RunningApp};
+use hk_core::apps::{AppAction, MediaCommand, RunningApp};
 use hk_core::clipboard::{ClipboardData, SharedFile};
 use hk_core::geometry::Point;
 use hk_core::input::InputEvent;
@@ -121,6 +121,11 @@ pub trait Platform: Clone + Send + Sync + 'static {
         Err(Error::Unsupported)
     }
 
+    /// Does this with the windows of an app from [`Platform::running_apps`]. May wait on it.
+    fn app_action(&self, _app: &str, _action: &AppAction) -> Result<(), Error> {
+        Err(Error::Unsupported)
+    }
+
     /// Other programs running here that share the keyboard and mouse too, which can get in
     /// each other's way.
     fn rival_programs(&self) -> Vec<String> {
@@ -163,4 +168,6 @@ pub enum Error {
     Media(String),
     #[error("taking a picture of the screen: {0}")]
     Screen(String),
+    #[error("an app's windows: {0}")]
+    AppWindows(String),
 }

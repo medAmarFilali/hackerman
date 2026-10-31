@@ -45,6 +45,7 @@ function stateWith(change: Partial<UiState> = {}): UiState {
       notifyFiles: true,
       shareApps: true,
       mediaControl: true,
+      appControl: true,
       mediaShortcuts: {
         enabled: true,
         playPause: { ctrl: true, alt: true, shift: false, meta: false, key: "Space" },

@@ -154,6 +154,9 @@ async fn receive_loop<P: Platform>(
             Message::Media { app, command } => {
                 let _ = events.send(Event::MediaRequested { peer, app, command });
             }
+            Message::AppAction { app, action } => {
+                let _ = events.send(Event::AppActionRequested { peer, app, action });
+            }
         }
     }
 }

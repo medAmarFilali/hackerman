@@ -2,6 +2,8 @@
 
 use serde::{Deserialize, Serialize};
 
+use crate::geometry::Rect;
+
 /// A device listing more apps than this is misbehaving. The rest are left out.
 pub const MAX_APPS: usize = 64;
 /// How much of a name or identifier from another device is kept, in characters.
@@ -12,6 +14,8 @@ pub const MAX_APP_MONITORS: usize = 16;
 pub const MAX_ICON_BYTES: usize = 32 * 1024;
 /// How many pictures of apps to keep for one device.
 pub const MAX_ICONS: usize = 128;
+/// A monitor's name is a device path, which is long but not this long.
+const MAX_MONITOR_TEXT: usize = 1024;
 
 /// An app with a window open, or something playing, on a computer.
 ///
@@ -62,6 +66,74 @@ pub enum MediaCommand {
     Back,
     /// The next track, or a little way forward if there isn't one.
     Forward,
+}
+
+/// Something to do with an app's windows, here or from another device.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum AppAction {
+    /// Brings it to the front, restoring it if it's minimized. That's one of its windows on
+    /// this monitor if there is one, and otherwise the one nearest the front.
+    BringUp { monitor: Option<String> },
+    /// Moves its windows on one monitor to another.
+    MoveTo { from: String, to: String },
+}
+
+impl AppAction {
+    /// Text from another device that's far too long for a monitor's name means nothing.
+    pub fn makes_sense(&self) -> bool {
+        let fits = |text: &String| text.chars().count() <= MAX_MONITOR_TEXT;
+        match self {
+            Self::BringUp { monitor } => monitor.as_ref().is_none_or(fits),
+            Self::MoveTo { from, to } => fits(from) && fits(to) && from != to,
+        }
+    }
+}
+
+/// Where a window goes when it's moved from one screen's usable area to another's. It keeps
+/// its size if there's room for it, and its place in proportion to the room there is to move
+/// about in, so a window against the right edge stays against the right edge. It always ends up
+/// fully on the new screen.
+pub fn place_on_other_screen(window: Rect, from: Rect, to: Rect) -> Rect {
+    let width = window.width.min(to.width);
+    let height = window.height.min(to.height);
+    let along = |start: f64,
+                 size: f64,
+                 from_start: f64,
+                 from_size: f64,
+                 to_start: f64,
+                 to_size: f64,
+                 new_size: f64| {
+        let room = from_size - size;
+        let fraction = if room > 0.0 {
+            ((start - from_start) / room).clamp(0.0, 1.0)
+        } else {
+            0.0
+        };
+        to_start + (fraction * (to_size - new_size)).round()
+    };
+    Rect::new(
+        along(
+            window.x,
+            window.width,
+            from.x,
+            from.width,
+            to.x,
+            to.width,
+            width,
+        ),
+        along(
+            window.y,
+            window.height,
+            from.y,
+            from.height,
+            to.y,
+            to.height,
+            height,
+        ),
+        width,
+        height,
+    )
 }
 
 /// Makes a list from another device safe to keep and show: nothing nameless, and nothing
@@ -129,5 +201,91 @@ mod tests {
     #[test]
     fn nothing_nameless_is_kept() {
         assert_eq!(tidied(vec![app("", &[])]), vec![]);
+    }
+
+    const LEFT: Rect = Rect {
+        x: 0.0,
+        y: 0.0,
+        width: 1920.0,
+        height: 1040.0,
+    };
+    const RIGHT: Rect = Rect {
+        x: 1920.0,
+        y: -200.0,
+        width: 2560.0,
+        height: 1400.0,
+    };
+
+    #[test]
+    fn a_window_keeps_its_size_and_its_place_on_the_new_screen() {
+        // In the top left corner, and it stays there.
+        let moved = place_on_other_screen(Rect::new(0.0, 0.0, 800.0, 600.0), LEFT, RIGHT);
+        assert_eq!(moved, Rect::new(1920.0, -200.0, 800.0, 600.0));
+        // Against the bottom right, and it stays there too, however big the new screen is.
+        let moved = place_on_other_screen(Rect::new(1120.0, 440.0, 800.0, 600.0), LEFT, RIGHT);
+        assert_eq!(moved.right(), RIGHT.right());
+        assert_eq!(moved.bottom(), RIGHT.bottom());
+        // Half way.
+        let moved = place_on_other_screen(Rect::new(560.0, 220.0, 800.0, 600.0), LEFT, RIGHT);
+        assert_eq!(moved.x, 1920.0 + 880.0);
+        assert_eq!(moved.y, -200.0 + 400.0);
+    }
+
+    #[test]
+    fn a_window_too_big_for_the_new_screen_is_made_to_fit() {
+        let moved = place_on_other_screen(Rect::new(1920.0, -200.0, 2400.0, 1300.0), RIGHT, LEFT);
+        assert_eq!(moved, Rect::new(0.0, 0.0, 1920.0, 1040.0));
+    }
+
+    #[test]
+    fn nonsense_from_another_device_is_noticed() {
+        let long = "m".repeat(MAX_MONITOR_TEXT + 1);
+        assert!(
+            !AppAction::BringUp {
+                monitor: Some(long.clone())
+            }
+            .makes_sense()
+        );
+        assert!(
+            !AppAction::MoveTo {
+                from: long,
+                to: "a".into()
+            }
+            .makes_sense()
+        );
+        assert!(
+            !AppAction::MoveTo {
+                from: "a".into(),
+                to: "a".into()
+            }
+            .makes_sense()
+        );
+        assert!(AppAction::BringUp { monitor: None }.makes_sense());
+        assert!(
+            AppAction::MoveTo {
+                from: "a".into(),
+                to: "b".into()
+            }
+            .makes_sense()
+        );
+    }
+
+    proptest::proptest! {
+        #[test]
+        fn a_moved_window_is_always_fully_on_the_new_screen(
+            x in -3000.0f64..3000.0,
+            y in -3000.0f64..3000.0,
+            width in 1.0f64..4000.0,
+            height in 1.0f64..4000.0,
+            to_width in 200.0f64..4000.0,
+            to_height in 200.0f64..4000.0,
+        ) {
+            let to = Rect::new(-1000.0, 500.0, to_width.round(), to_height.round());
+            let moved = place_on_other_screen(Rect::new(x, y, width, height), LEFT, to);
+            proptest::prop_assert!(moved.x >= to.x - 0.5);
+            proptest::prop_assert!(moved.y >= to.y - 0.5);
+            proptest::prop_assert!(moved.right() <= to.right() + 0.5);
+            proptest::prop_assert!(moved.bottom() <= to.bottom() + 0.5);
+        }
     }
 }

@@ -29,10 +29,16 @@ export type Request =
   | { type: "setFilesAllowed"; device: Fingerprint; allowed: boolean }
   | { type: "mediaCommand"; device: Fingerprint; app: string; command: MediaCommand }
   | { type: "recordingShortcut"; active: boolean }
+  | { type: "appAction"; device: Fingerprint; app: string; action: AppAction }
   | { type: "setScreensAllowed"; device: Fingerprint; allowed: boolean }
   | { type: "shutdown" };
 
 export type MediaCommand = "playPause" | "back" | "forward";
+
+/** Something to do with an app's windows, on the PC it's on. */
+export type AppAction =
+  | { bringUp: { monitor: string | null } }
+  | { moveTo: { from: string; to: string } };
 
 /** Which picture of which screen. */
 export interface ScreenAsk {
@@ -90,6 +96,8 @@ export interface Rules {
   shareApps: boolean;
   /** Let other PCs play, pause and skip what's playing here. */
   mediaControl: boolean;
+  /** Let other PCs bring apps here to the front, and move them between the screens here. */
+  appControl: boolean;
   mediaShortcuts: MediaShortcuts;
 }
 
@@ -189,6 +197,8 @@ export interface AppView {
   minimized: boolean;
   /** Set if it can be played and paused from here. */
   media: MediaState | null;
+  /** It has a window to bring up or move. One playing from the tray doesn't. */
+  hasWindow: boolean;
 }
 
 export type PairingStage =

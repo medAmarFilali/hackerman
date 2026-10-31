@@ -14,7 +14,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result};
 use base64::Engine as _;
-use hk_core::apps::{self, MAX_ICON_BYTES, MAX_ICONS, MediaCommand, RunningApp};
+use hk_core::apps::{self, AppAction, MAX_ICON_BYTES, MAX_ICONS, MediaCommand, RunningApp};
 use hk_core::clipboard::{ClipVersion, ClipboardData, MAX_SHARED_FILES, SharedFile};
 use hk_core::device::Fingerprint;
 use hk_core::layout::{DeviceMonitors, LayoutDoc, Monitor, Placement, Topology};
@@ -32,8 +32,9 @@ use hk_net::{
 };
 use hk_platform::{Capture, FileSource, Platform};
 use hk_proto::{
-    ClipboardBlob, FEATURE_APPS, FEATURE_FILES, FEATURE_MEDIA, FEATURE_SCREENS, FEATURE_SEND_FILES,
-    FEATURES, Message, PROTOCOL_VERSION, ScreenAnswer, ScreenRequest, TransferUpdate,
+    ClipboardBlob, FEATURE_APP_ACTIONS, FEATURE_APPS, FEATURE_FILES, FEATURE_MEDIA,
+    FEATURE_SCREENS, FEATURE_SEND_FILES, FEATURES, Message, PROTOCOL_VERSION, ScreenAnswer,
+    ScreenRequest, TransferUpdate,
 };
 use tokio::runtime::Handle;
 use tokio::sync::mpsc::{self, UnboundedReceiver, UnboundedSender};
@@ -243,6 +244,12 @@ pub enum Event {
     },
     /// A media shortcut was pressed on this device's keyboard.
     MediaShortcut(MediaCommand),
+    /// A device wants something done with an app's windows here.
+    AppActionRequested {
+        peer: Fingerprint,
+        app: String,
+        action: AppAction,
+    },
     PairingStage {
         peer_name: Option<String>,
         stage: PairingStage,
@@ -864,6 +871,9 @@ impl<P: Platform> Engine<P> {
                     self.send_media_command(device, app, command);
                 }
             }
+            Event::AppActionRequested { peer, app, action } => {
+                self.on_app_action_requested(peer, app, action);
+            }
             Event::PairingStage { peer_name, stage } => {
                 if let Some(pairing) = &mut self.pairing {
                     pairing.view = PairingView { peer_name, stage };
@@ -940,6 +950,11 @@ impl<P: Platform> Engine<P> {
             Request::RecordingShortcut { active } => {
                 self.shared.switcher().set_shortcuts_paused(active);
             }
+            Request::AppAction {
+                device,
+                app,
+                action,
+            } => self.send_app_action(device, app, action),
             Request::SetScreensAllowed { device, allowed } => {
                 self.set_screens_allowed(device, allowed);
             }
@@ -1386,6 +1401,55 @@ impl<P: Platform> Engine<P> {
         }
     }
 
+    // Bringing apps up and moving them
+
+    fn send_app_action(&mut self, device: Fingerprint, app: String, action: AppAction) {
+        tracing::info!(%device, app, ?action, "doing something with an app's windows");
+        if device == self.me {
+            self.run_app_action(app, action);
+            return;
+        }
+        // A PC with sharing turned off has nothing to do with the others.
+        if !self.settings.enabled {
+            return;
+        }
+        if let Some(session) = self
+            .sessions
+            .get(&device)
+            .filter(|session| session.up && session.features & FEATURE_APP_ACTIONS != 0)
+        {
+            let _ = session.outgoing.send(Message::AppAction { app, action });
+        }
+    }
+
+    fn on_app_action_requested(&mut self, peer: Fingerprint, app: String, action: AppAction) {
+        let is_open_here = self.local_apps.iter().any(|known| known.id == app);
+        if !self.settings.enabled
+            || !self.settings.rules.app_control
+            || !is_open_here
+            || !action.makes_sense()
+        {
+            tracing::info!(%peer, app, "refused to do something with an app's windows");
+            return;
+        }
+        tracing::info!(%peer, app, ?action, "another device is doing something with an app's windows");
+        self.run_app_action(app, action);
+    }
+
+    /// This waits on the app, so it's done off to the side. The canvas then gets to hear about
+    /// where its windows are now, without waiting for the next look.
+    fn run_app_action(&self, app: String, action: AppAction) {
+        let platform = self.shared.platform.clone();
+        let events = self.events.clone();
+        tokio::task::spawn_blocking(move || {
+            if let Err(error) = platform.app_action(&app, &action) {
+                tracing::warn!(%error, app, "doing something with an app's windows didn't work");
+            }
+            std::thread::sleep(MEDIA_SETTLES);
+            let _ = events.send(Event::RefreshApps);
+        });
+    }
+
     fn apps_on(&self, device: Fingerprint, monitor: &Monitor) -> Vec<AppView> {
         let apps = if device == self.me {
             Some(&self.local_apps)
@@ -1401,6 +1465,7 @@ impl<P: Platform> Engine<P> {
                 icon: self.icon_urls.get(&(device, app.id.clone())).cloned(),
                 minimized: app.minimized,
                 media: app.media,
+                has_window: !app.monitors.is_empty(),
             })
             .collect()
     }

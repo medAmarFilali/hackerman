@@ -54,6 +54,7 @@ fn rules_while_locked() -> Rules {
         notify_files: false,
         share_apps: false,
         media_control: false,
+        app_control: false,
         media_shortcuts: MediaShortcuts {
             enabled: false,
             ..MediaShortcuts::default()

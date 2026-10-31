@@ -1,4 +1,5 @@
 import {
+  AppWindow,
   ArrowLeftRight,
   ArrowUpDown,
   Ban,
@@ -15,7 +16,7 @@ import {
   SkipForward,
   Star,
 } from "lucide-react";
-import { useEffect, useMemo, useRef, useState } from "react";
+import { createContext, useContext, useEffect, useMemo, useRef, useState } from "react";
 
 import { DeviceIcon, NumberBadge, type Presence, ScreenStand } from "@/components/Art";
 import { ScreenViewer } from "@/components/ScreenViewer";
@@ -79,6 +80,8 @@ const PLAYER_NAME_NEEDS_WIDTH = 170;
 const PLAYER_WIDTH_WITHOUT_NAME = 104;
 /** How often the small pictures on the canvas change. */
 const SMALL_PICTURE_EVERY_MS = 1000;
+/** How far the pointer goes before pressing an app counts as dragging it, in pixels. */
+const APP_DRAG_STARTS_AT = 5;
 
 function keyOf(screen: { device: Fingerprint; monitor: string }): string {
   return `${screen.device}/${screen.monitor}`;
@@ -149,6 +152,21 @@ interface Resize extends DragStart {
 
 type Drag = Move | Resize;
 
+/** An app being dragged towards another screen of its PC. */
+interface AppDrag {
+  app: AppView;
+  from: ScreenView;
+  x: number;
+  y: number;
+  /** The screen it's over, if it's over another one. */
+  over: string | null;
+}
+
+/** Starts following the pointer when an app is pressed. */
+const AppDragContext = createContext<
+  (event: React.PointerEvent, app: AppView, from: ScreenView) => void
+>(() => {});
+
 export function MonitorCanvas({ state }: { state: UiState }) {
   const area = useRef<HTMLDivElement>(null);
   const [size, setSize] = useState({ width: 0, height: 0 });
@@ -158,6 +176,7 @@ export function MonitorCanvas({ state }: { state: UiState }) {
   const [dropped, setDropped] = useState<Map<string, ScreenView> | null>(null);
   const { laptopKeyboards, monitorStands } = useAppearance();
   const fileDrag = useFileDrag();
+  const [appDrag, setAppDrag] = useState<AppDrag | null>(null);
   const [viewing, setViewing] = useState<string | null>(null);
 
   useEffect(() => {
@@ -342,6 +361,57 @@ export function MonitorCanvas({ state }: { state: UiState }) {
     }
   }
 
+  /** Clicking an app is handled by the button itself, unless the pointer goes somewhere first. */
+  function onAppPressed(event: React.PointerEvent, app: AppView, from: ScreenView) {
+    if (event.button !== 0) return;
+    // Otherwise the screen underneath would start moving.
+    event.stopPropagation();
+    const start = { x: event.clientX, y: event.clientY };
+    let dragging = false;
+    const moved = (move: PointerEvent) => {
+      if (!dragging) {
+        if (Math.hypot(move.clientX - start.x, move.clientY - start.y) < APP_DRAG_STARTS_AT) return;
+        dragging = true;
+      }
+      setAppDrag({
+        app,
+        from,
+        x: move.clientX,
+        y: move.clientY,
+        over: screenKeyAt(move.clientX, move.clientY, keyOf(from)),
+      });
+    };
+    const finish = (up: PointerEvent, cancelled: boolean) => {
+      window.removeEventListener("pointermove", moved);
+      window.removeEventListener("pointerup", released);
+      window.removeEventListener("pointercancel", abandoned);
+      if (!dragging) return;
+      setAppDrag(null);
+      // The click that comes with letting go isn't a click on the app. There's none at all if
+      // the pointer left the window, and that mustn't take the next real one.
+      const swallow = (click: Event) => click.stopPropagation();
+      window.addEventListener("click", swallow, { capture: true, once: true });
+      setTimeout(() => window.removeEventListener("click", swallow, { capture: true }), 50);
+      const over = screenKeyAt(up.clientX, up.clientY, keyOf(from));
+      const target = state.screens.find((screen) => keyOf(screen) === over);
+      if (!cancelled && target && target.device === from.device) {
+        send({
+          type: "appAction",
+          device: from.device,
+          app: app.id,
+          action: { moveTo: { from: from.monitor, to: target.monitor } },
+        });
+      }
+    };
+    const released = (up: PointerEvent) => finish(up, false);
+    const abandoned = (up: PointerEvent) => finish(up, true);
+    window.addEventListener("pointermove", moved);
+    window.addEventListener("pointerup", released);
+    window.addEventListener("pointercancel", abandoned);
+  }
+
+  const appDragTarget = appDrag && state.screens.find((screen) => keyOf(screen) === appDrag.over);
+  const appDropAllowed = appDragTarget?.device === appDrag?.from.device;
   const screenBeingViewed = state.screens.find((screen) => keyOf(screen) === viewing);
   const nameOfDevice = (device: Fingerprint) =>
     device === state.me.fingerprint
@@ -362,6 +432,7 @@ export function MonitorCanvas({ state }: { state: UiState }) {
     : [];
 
   return (
+    <AppDragContext.Provider value={onAppPressed}>
     <div
       ref={area}
       className="relative min-h-0 flex-1 touch-none select-none overflow-hidden bg-background"
@@ -436,6 +507,9 @@ export function MonitorCanvas({ state }: { state: UiState }) {
             onResizeStart={(event) => onResizeStart(event, screen)}
             onResetSize={() => resetSize(screen)}
             onView={() => setViewing(key)}
+            appDrop={
+              appDrag?.over === key ? (appDropAllowed ? "ok" : "blocked") : null
+            }
           />
         );
       })}
@@ -507,6 +581,27 @@ export function MonitorCanvas({ state }: { state: UiState }) {
         </p>
       )}
 
+      {appDrag && (
+        <>
+          <div
+            aria-hidden
+            style={{ left: appDrag.x + 10, top: appDrag.y + 10 }}
+            className="pointer-events-none fixed z-50 rounded-md border bg-card p-1 shadow-lg"
+          >
+            <AppIcon app={appDrag.app} />
+          </div>
+          <p
+            role="status"
+            className="pointer-events-none absolute inset-x-4 bottom-3 z-30 mx-auto w-fit max-w-full rounded-lg border bg-card px-3 py-1.5 text-center text-xs font-medium"
+          >
+            {appDrag.over === null
+              ? `Drop ${appDrag.app.name} on another screen of ${nameOfDevice(appDrag.from.device)}`
+              : appDropAllowed
+                ? `Move ${appDrag.app.name} to this screen`
+                : `${appDrag.app.name} can only move between the screens of ${nameOfDevice(appDrag.from.device)}`}
+          </p>
+        </>
+      )}
 
       {screenBeingViewed && (
         <ScreenViewer
@@ -517,9 +612,18 @@ export function MonitorCanvas({ state }: { state: UiState }) {
         />
       )}
     </div>
+    </AppDragContext.Provider>
   );
 }
 
+/** The screen under this point on the canvas, leaving out the one an app is coming from. */
+function screenKeyAt(x: number, y: number, leaving: string): string | null {
+  const key = document
+    .elementFromPoint(x, y)
+    ?.closest("[data-screen-key]")
+    ?.getAttribute("data-screen-key");
+  return key && key !== leaving ? key : null;
+}
 
 /** Says whether this arrangement will come back if the screens change and change back. */
 function LayoutStatus({ state }: { state: UiState }) {
@@ -571,7 +675,7 @@ function GuideItem({
 /** How to use the canvas. Gives way when the window is too short to spare the room. */
 export function CanvasGuide() {
   return (
-    <div className="grid grid-cols-4 gap-5 border-t bg-card px-5 py-3 [@media(max-height:640px)]:hidden">
+    <div className="grid grid-cols-5 gap-4 border-t bg-card px-5 py-3 [@media(max-height:640px)]:hidden">
       <GuideItem icon={Move} title="Move">
         Drag a screen. Alt swaps Whole PC and One screen.
       </GuideItem>
@@ -583,6 +687,9 @@ export function CanvasGuide() {
       </GuideItem>
       <GuideItem icon={FileUp} title="Send files">
         Drop files on a screen to save them on that PC.
+      </GuideItem>
+      <GuideItem icon={AppWindow} title="Apps">
+        Click one to bring it up. Drag it to another screen of its PC.
       </GuideItem>
     </div>
   );
@@ -633,6 +740,8 @@ interface MonitorTileProps {
   onResizeStart: (event: React.PointerEvent) => void;
   onResetSize: () => void;
   onView: () => void;
+  /** An app is being dragged over this screen, and whether it can go there. */
+  appDrop: "ok" | "blocked" | null;
 }
 
 function MonitorTile({
@@ -655,6 +764,7 @@ function MonitorTile({
   onResizeStart,
   onResetSize,
   onView,
+  appDrop,
 }: MonitorTileProps) {
   const active = presence === "active";
   const away = presence === "away";
@@ -685,7 +795,9 @@ function MonitorTile({
       aria-label={label}
       data-presence={presence}
       data-drop-device={screen.device}
+      data-screen-key={keyOf(screen)}
       data-drop={filesOver ? (cantReceive ? "blocked" : "ok") : undefined}
+      data-app-drop={appDrop ?? undefined}
       onPointerDown={onPointerDown}
       onPointerMove={onPointerMove}
       onPointerUp={onPointerUp}
@@ -710,6 +822,8 @@ function MonitorTile({
         draggingFiles && !filesOver && !cantReceive && "ring-1 ring-signal/50",
         filesOver && !cantReceive && "ring-2 ring-signal",
         filesOver && cantReceive && "ring-2 ring-destructive/60",
+        appDrop === "ok" && "ring-2 ring-signal",
+        appDrop === "blocked" && "ring-2 ring-destructive/60",
       )}
     >
       <div className={cn("frame-inner relative h-full overflow-hidden", away && "opacity-60")}>
@@ -848,14 +962,14 @@ function AppsOnScreen({
         return besidePlayer && index === lastIndex ? (
           <div key={app.id} className="flex min-w-0 items-center gap-1.5">
             {player}
-            <AppIcons apps={others} room={inner - PLAYER_WIDTH_WITHOUT_NAME} />
+            <AppIcons apps={others} screen={screen} deviceName={deviceName} room={inner - PLAYER_WIDTH_WITHOUT_NAME} />
           </div>
         ) : (
           player
         );
       })}
       {rowLeft && others.length > 0 && (
-        <AppIcons apps={others} room={inner} />
+        <AppIcons apps={others} screen={screen} deviceName={deviceName} room={inner} />
       )}
     </div>
   );
@@ -863,9 +977,13 @@ function AppsOnScreen({
 
 function AppIcons({
   apps,
+  screen,
+  deviceName,
   room,
 }: {
   apps: AppView[];
+  screen: ScreenView;
+  deviceName: string;
   room: number;
 }) {
   const fit = Math.floor(room / APP_ICON_WIDTH);
@@ -876,7 +994,7 @@ function AppIcons({
     <ul aria-label="Open apps" className="flex min-w-0 items-center gap-1">
       {shown.map((app) => (
         <li key={app.id} title={app.minimized ? `${app.name} (minimized)` : app.name}>
-          <AppIcon app={app} />
+          <AppButton app={app} screen={screen} deviceName={deviceName} />
         </li>
       ))}
       {rest.length > 0 && (
@@ -888,6 +1006,42 @@ function AppIcons({
         </li>
       )}
     </ul>
+  );
+}
+
+/** An app's icon, to click to bring it up, or to drag to another of its PC's screens. */
+function AppButton({
+  app,
+  screen,
+  deviceName,
+}: {
+  app: AppView;
+  screen: ScreenView;
+  deviceName: string;
+}) {
+  const startDragging = useContext(AppDragContext);
+  // Something playing from the tray has no window to do this with.
+  if (!app.hasWindow) return <AppIcon app={app} />;
+  return (
+    <button
+      type="button"
+      data-app-button={app.id}
+      aria-label={`Bring ${app.name} to the front on ${deviceName}. Drag it to move it to another screen.`}
+      onPointerDown={(event) => startDragging(event, app, screen)}
+      onDoubleClick={(event) => event.stopPropagation()}
+      onKeyDown={(event) => event.stopPropagation()}
+      onClick={() =>
+        send({
+          type: "appAction",
+          device: screen.device,
+          app: app.id,
+          action: { bringUp: { monitor: screen.monitor } },
+        })
+      }
+      className="block shrink-0 cursor-pointer rounded-[3px] outline-none transition-transform hover:scale-115 focus-visible:ring-2 focus-visible:ring-ring/70 active:cursor-grabbing motion-reduce:transition-none"
+    >
+      <AppIcon app={app} />
+    </button>
   );
 }
 
@@ -944,7 +1098,7 @@ function Player({
       className="flex w-fit max-w-full min-w-0 cursor-default items-center gap-1 rounded-lg border bg-card py-0.5 ps-1 pe-0.5"
     >
       <span title={app.name} className="shrink-0">
-        <AppIcon app={app} />
+        <AppButton app={app} screen={screen} deviceName={deviceName} />
       </span>
       {showName && (
         <span title={app.name} className="min-w-0 truncate pe-0.5 text-[0.6875rem] font-medium">

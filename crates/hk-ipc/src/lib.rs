@@ -8,7 +8,7 @@
 
 mod transport;
 
-use hk_core::apps::{MediaCommand, MediaState};
+use hk_core::apps::{AppAction, MediaCommand, MediaState};
 use hk_core::device::Fingerprint;
 use hk_core::layout::Placement;
 use hk_core::rules::Rules;
@@ -93,6 +93,12 @@ pub enum Request {
     /// nothing, so that the app can see what's pressed.
     RecordingShortcut {
         active: bool,
+    },
+    /// Does this with an app's windows on a device, which may be this one.
+    AppAction {
+        device: Fingerprint,
+        app: String,
+        action: AppAction,
     },
     /// Whether a device can see this device's screens.
     SetScreensAllowed {
@@ -328,6 +334,8 @@ pub struct AppView {
     pub minimized: bool,
     /// Set if it can be played and paused from here.
     pub media: Option<MediaState>,
+    /// It has a window to bring up or move. One playing from the tray doesn't.
+    pub has_window: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -527,6 +535,39 @@ mod tests {
     }
 
     #[test]
+    fn doing_things_with_apps_uses_the_format_the_app_sends() {
+        let request: Request = serde_json::from_str(&format!(
+            r#"{{"type":"appAction","device":"{DEVICE}","app":"msedge","action":{{"bringUp":{{"monitor":"left"}}}}}}"#
+        ))
+        .unwrap();
+        assert_eq!(
+            request,
+            Request::AppAction {
+                device: DEVICE,
+                app: "msedge".into(),
+                action: AppAction::BringUp {
+                    monitor: Some("left".into()),
+                },
+            }
+        );
+        let request: Request = serde_json::from_str(&format!(
+            r#"{{"type":"appAction","device":"{DEVICE}","app":"msedge","action":{{"moveTo":{{"from":"left","to":"right"}}}}}}"#
+        ))
+        .unwrap();
+        assert_eq!(
+            request,
+            Request::AppAction {
+                device: DEVICE,
+                app: "msedge".into(),
+                action: AppAction::MoveTo {
+                    from: "left".into(),
+                    to: "right".into(),
+                },
+            }
+        );
+    }
+
+    #[test]
     fn pictures_use_the_format_the_app_sends_and_reads() {
         let request: Request = serde_json::from_str(&format!(
             r#"{{"type":"screenPicture","id":7,"device":"{DEVICE}","monitor":"m","maxWidth":640,"maxHeight":400,"known":12,"cursor":true}}"#
@@ -616,8 +657,10 @@ mod tests {
                 can_go_back: true,
                 can_go_forward: false,
             }),
+            has_window: true,
         })
         .unwrap();
+        assert_eq!(json["hasWindow"], true);
         assert_eq!(json["icon"], "data:image/png;base64,AA==");
         assert_eq!(json["media"]["playing"], serde_json::Value::Null);
         assert_eq!(json["media"]["canGoBack"], true);

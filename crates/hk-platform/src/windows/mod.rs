@@ -1,5 +1,6 @@
 //! Windows: global low-level hooks to capture input, `SendInput` to replay it.
 
+mod app_windows;
 mod apps;
 mod clipboard;
 mod cursor;
@@ -21,7 +22,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use hk_core::apps::{MediaCommand, RunningApp};
+use hk_core::apps::{AppAction, MediaCommand, RunningApp};
 use hk_core::clipboard::{ClipboardData, SharedFile};
 use hk_core::geometry::Point;
 use hk_core::input::InputEvent;
@@ -256,6 +257,13 @@ impl Platform for NativePlatform {
         match self.role {
             Role::Agent => media::command(app, command),
             Role::Helper { .. } => Err(Error::Media("the screen is locked".to_string())),
+        }
+    }
+
+    fn app_action(&self, app: &str, action: &AppAction) -> Result<(), Error> {
+        match self.role {
+            Role::Agent => app_windows::run(app, action),
+            Role::Helper { .. } => Err(Error::AppWindows("the screen is locked".to_string())),
         }
     }
 

@@ -2,7 +2,7 @@
 
 #![forbid(unsafe_code)]
 
-use hk_core::apps::{MediaCommand, RunningApp};
+use hk_core::apps::{AppAction, MediaCommand, RunningApp};
 use hk_core::clipboard::{ClipVersion, ClipboardData, SharedFile};
 use hk_core::input::InputEvent;
 use hk_core::layout::{LayoutDoc, Monitor};
@@ -39,9 +39,16 @@ pub const FEATURE_MEDIA: u32 = 1 << 3;
 /// Can be asked for pictures of its screens, with a [`ScreenRequest`].
 pub const FEATURE_SCREENS: u32 = 1 << 4;
 
+/// Can be asked to bring apps to the front, and move them between its screens.
+pub const FEATURE_APP_ACTIONS: u32 = 1 << 5;
+
 /// Everything this version can do beyond the base protocol, for [`Message::Hello`].
-pub const FEATURES: u32 =
-    FEATURE_FILES | FEATURE_SEND_FILES | FEATURE_APPS | FEATURE_MEDIA | FEATURE_SCREENS;
+pub const FEATURES: u32 = FEATURE_FILES
+    | FEATURE_SEND_FILES
+    | FEATURE_APPS
+    | FEATURE_MEDIA
+    | FEATURE_SCREENS
+    | FEATURE_APP_ACTIONS;
 
 /// A message sent from one peer to another.
 ///
@@ -96,6 +103,8 @@ pub enum Message {
     AppIcon { app: String, png: Vec<u8> },
     /// Asks the receiver to do this with an app. Needs [`FEATURE_MEDIA`].
     Media { app: String, command: MediaCommand },
+    /// Asks the receiver to do this with an app's windows. Needs [`FEATURE_APP_ACTIONS`].
+    AppAction { app: String, action: AppAction },
 }
 
 /// See [`Message::Transfer`].
@@ -404,6 +413,26 @@ mod tests {
         for answer in [FileAnswer::Content, FileAnswer::Refused("gone".into())] {
             let bytes = encode_file_answer(&answer).unwrap();
             assert_eq!(decode_file_answer(&bytes).unwrap(), answer);
+        }
+    }
+
+    #[test]
+    fn doing_things_with_apps_round_trips() {
+        for action in [
+            AppAction::BringUp { monitor: None },
+            AppAction::BringUp {
+                monitor: Some("left".into()),
+            },
+            AppAction::MoveTo {
+                from: "left".into(),
+                to: "right".into(),
+            },
+        ] {
+            let message = Message::AppAction {
+                app: "msedge".into(),
+                action,
+            };
+            assert_eq!(decode(&encode(&message).unwrap()).unwrap(), message);
         }
     }
 

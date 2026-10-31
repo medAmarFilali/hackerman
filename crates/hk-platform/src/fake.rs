@@ -4,7 +4,7 @@ use std::io::Read;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
-use hk_core::apps::{MediaCommand, RunningApp};
+use hk_core::apps::{AppAction, MediaCommand, RunningApp};
 use hk_core::clipboard::{ClipboardData, SharedFile};
 use hk_core::geometry::{Point, Rect};
 use hk_core::input::InputEvent;
@@ -37,6 +37,7 @@ struct State {
     icons: Vec<(String, Vec<u8>)>,
     icons_asked_for: Vec<String>,
     media_commands: Vec<(String, MediaCommand)>,
+    app_actions: Vec<(String, AppAction)>,
     rivals: Vec<String>,
     /// What each monitor is showing, if a test has said. Others show a test pattern.
     screen_pictures: Vec<(String, ScreenImage)>,
@@ -216,6 +217,11 @@ impl FakePlatform {
         self.state().media_commands.clone()
     }
 
+    /// What's been done with apps' windows here so far.
+    pub fn app_actions(&self) -> Vec<(String, AppAction)> {
+        self.state().app_actions.clone()
+    }
+
     pub fn set_rival_programs(&self, rivals: Vec<String>) {
         self.state().rivals = rivals;
     }
@@ -352,6 +358,20 @@ impl Platform for FakePlatform {
 
     fn media_command(&self, app: &str, command: MediaCommand) -> Result<(), Error> {
         self.state().media_commands.push((app.to_string(), command));
+        Ok(())
+    }
+
+    fn app_action(&self, app: &str, action: &AppAction) -> Result<(), Error> {
+        let mut state = self.state();
+        state.app_actions.push((app.to_string(), action.clone()));
+        if let AppAction::MoveTo { from, to } = action
+            && let Some(moving) = state.apps.iter_mut().find(|known| known.id == app)
+        {
+            moving.monitors.retain(|on| on != from);
+            if !moving.monitors.contains(to) {
+                moving.monitors.push(to.clone());
+            }
+        }
         Ok(())
     }
 

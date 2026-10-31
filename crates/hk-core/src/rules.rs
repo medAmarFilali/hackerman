@@ -35,6 +35,8 @@ pub struct Rules {
     pub share_apps: bool,
     /// Let other devices play, pause and skip what's playing here.
     pub media_control: bool,
+    /// Let other devices bring apps here to the front, and move them between the screens here.
+    pub app_control: bool,
     /// Keyboard shortcuts for what's playing, here or on another device.
     pub media_shortcuts: MediaShortcuts,
 }
@@ -54,6 +56,7 @@ impl Default for Rules {
             notify_files: true,
             share_apps: true,
             media_control: true,
+            app_control: true,
             media_shortcuts: MediaShortcuts::default(),
         }
     }
@@ -165,6 +168,7 @@ mod tests {
         assert!(rules.notify_files);
         assert!(rules.share_apps);
         assert!(rules.media_control);
+        assert!(rules.app_control);
         assert_eq!(rules.media_shortcuts, MediaShortcuts::default());
     }
 

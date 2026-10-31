@@ -9,7 +9,7 @@ use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::{Duration, Instant};
 
 use base64::Engine as _;
-use hk_core::apps::{MediaCommand, MediaState, RunningApp};
+use hk_core::apps::{AppAction, MediaCommand, MediaState, RunningApp};
 use hk_core::clipboard::{ClipVersion, ClipboardData, ClipboardImage, SharedFile};
 use hk_core::device::Fingerprint;
 use hk_core::geometry::{Point, Rect};
@@ -27,9 +27,9 @@ use hk_net::{Endpoint, Identity, TrustStore};
 use hk_platform::Platform;
 use hk_platform::fake::FakePlatform;
 use hk_proto::{
-    ClipboardBlob, FEATURE_FILES, FEATURE_SCREENS, FEATURE_SEND_FILES, FEATURES, FileAnswer,
-    FileRequest, Message, PROTOCOL_VERSION, PeerRequest, ScreenAnswer, ScreenRequest,
-    TransferUpdate,
+    ClipboardBlob, FEATURE_APP_ACTIONS, FEATURE_FILES, FEATURE_SCREENS, FEATURE_SEND_FILES,
+    FEATURES, FileAnswer, FileRequest, Message, PROTOCOL_VERSION, PeerRequest, ScreenAnswer,
+    ScreenRequest, TransferUpdate,
 };
 use tokio::task::JoinHandle;
 
@@ -4661,4 +4661,205 @@ async fn wait_for_any_more_input(device: &Device, seen: usize) {
     tokio::time::timeout(Duration::from_secs(2), wait)
         .await
         .expect("input stopped arriving");
+}
+
+// Bringing apps up and moving them
+
+async fn wait_for_app_action(device: &Device, app: &str, action: &AppAction) {
+    let wanted = (app.to_string(), action.clone());
+    let wait = async {
+        while !device.platform.app_actions().contains(&wanted) {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    };
+    tokio::time::timeout(TIMEOUT, wait)
+        .await
+        .unwrap_or_else(|_| panic!("{} never got {wanted:?}", device.name));
+}
+
+fn on_screen(state: &UiState, device: Fingerprint, app: &str) -> bool {
+    !apps_on_screen(state, device, "fake-0")
+        .iter()
+        .all(|on| *on != app)
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn clicking_an_app_brings_it_up_on_the_pc_it_is_on() {
+    let (mut a, b) = side_by_side().await;
+    let (a_id, b_id) = (a.fingerprint(), b.fingerprint());
+    b.platform
+        .set_running_apps(vec![window_of("msedge", "Microsoft Edge", &["fake-0"])]);
+    a.wait_for("the app", |s| on_screen(s, b_id, "msedge"))
+        .await;
+
+    let action = AppAction::BringUp {
+        monitor: Some("fake-0".into()),
+    };
+    a.request(Request::AppAction {
+        device: b_id,
+        app: "msedge".into(),
+        action: action.clone(),
+    })
+    .await;
+    wait_for_app_action(&b, "msedge", &action).await;
+    assert!(a.platform.app_actions().is_empty());
+
+    // And this PC's own, without leaving it.
+    a.platform
+        .set_running_apps(vec![window_of("code", "Visual Studio Code", &["fake-0"])]);
+    a.request(Request::AppAction {
+        device: a_id,
+        app: "code".into(),
+        action: action.clone(),
+    })
+    .await;
+    wait_for_app_action(&a, "code", &action).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn dragging_an_app_to_another_screen_moves_it_on_that_pc() {
+    let mut a = Device::start("alpha").await;
+    let mut b = Device::start_with("bravo", FakePlatform::with_screens(2)).await;
+    pair(&mut a, &mut b).await;
+    let b_id = b.fingerprint();
+    b.platform
+        .set_running_apps(vec![window_of("msedge", "Microsoft Edge", &["fake-0"])]);
+    a.wait_for("the app", |s| on_screen(s, b_id, "msedge"))
+        .await;
+
+    let action = AppAction::MoveTo {
+        from: "fake-0".into(),
+        to: "fake-1".into(),
+    };
+    a.request(Request::AppAction {
+        device: b_id,
+        app: "msedge".into(),
+        action: action.clone(),
+    })
+    .await;
+    wait_for_app_action(&b, "msedge", &action).await;
+
+    // Windows has moved it, and the other PC hears about that without waiting for long.
+    a.wait_for("the app on its new screen", |s| {
+        apps_on_screen(s, b_id, "fake-1") == ["msedge"]
+            && apps_on_screen(s, b_id, "fake-0").is_empty()
+    })
+    .await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_pc_can_refuse_to_have_its_apps_brought_up_or_moved() {
+    let (mut a, mut b) = side_by_side().await;
+    let b_id = b.fingerprint();
+    b.platform
+        .set_running_apps(vec![window_of("msedge", "Microsoft Edge", &["fake-0"])]);
+    a.wait_for("the app", |s| on_screen(s, b_id, "msedge"))
+        .await;
+    let bring_up = AppAction::BringUp { monitor: None };
+    let ask = |app: &str, action: &AppAction| Request::AppAction {
+        device: b_id,
+        app: app.to_string(),
+        action: action.clone(),
+    };
+
+    // Only an app that's open there.
+    a.request(ask("notepad", &bring_up)).await;
+    // Nor anything making no sense.
+    a.request(ask(
+        "msedge",
+        &AppAction::MoveTo {
+            from: "fake-0".into(),
+            to: "fake-0".into(),
+        },
+    ))
+    .await;
+    a.request(ask("msedge", &bring_up)).await;
+    wait_for_app_action(&b, "msedge", &bring_up).await;
+    assert_eq!(
+        b.platform.app_actions().len(),
+        1,
+        "only the one that's fine"
+    );
+
+    b.request(Request::SetRules {
+        rules: Rules {
+            app_control: false,
+            ..Rules::default()
+        },
+    })
+    .await;
+    b.wait_for("the new rule", |s| !s.rules.app_control).await;
+    a.request(ask("msedge", &bring_up)).await;
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert_eq!(b.platform.app_actions().len(), 1);
+
+    b.request(Request::SetRules {
+        rules: Rules::default(),
+    })
+    .await;
+    b.wait_for("the rule back", |s| s.rules.app_control).await;
+    b.request(Request::SetEnabled { enabled: false }).await;
+    b.wait_for("being off", |s| !s.enabled).await;
+    a.request(ask("msedge", &bring_up)).await;
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert_eq!(b.platform.app_actions().len(), 1);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_pc_on_an_older_version_is_not_asked_to_do_things_with_its_apps() {
+    let (mut a, mut peer) = device_with_hand_written_peer(FEATURES & !FEATURE_APP_ACTIONS).await;
+    a.request(Request::AppAction {
+        device: peer.id,
+        app: "msedge".into(),
+        action: AppAction::BringUp { monitor: None },
+    })
+    .await;
+    a.request(Request::MediaCommand {
+        device: peer.id,
+        app: "the message after it".into(),
+        command: MediaCommand::PlayPause,
+    })
+    .await;
+    // That second one getting there, with nothing before it, means the first never went.
+    loop {
+        let message = tokio::time::timeout(TIMEOUT, peer.receiver.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        match message {
+            Message::AppAction { .. } => panic!("it was asked anyway"),
+            Message::Media { .. } => break,
+            _ => {}
+        }
+    }
+}
+
+/// Something playing from the tray has no window to bring up or move, so nothing should offer to.
+#[tokio::test(flavor = "multi_thread")]
+async fn only_an_app_with_a_window_can_be_brought_up() {
+    let (mut a, b) = side_by_side().await;
+    let b_id = b.fingerprint();
+    let in_tray = RunningApp {
+        monitors: Vec::new(),
+        ..player("spotify", Some(true))
+    };
+    b.platform.set_running_apps(vec![
+        window_of("msedge", "Microsoft Edge", &["fake-0"]),
+        in_tray,
+    ]);
+    a.wait_for("both apps", |s| {
+        on_screen(s, b_id, "msedge") && on_screen(s, b_id, "spotify")
+    })
+    .await;
+    let screen = a.state.screens.iter().find(|s| s.device == b_id).unwrap();
+    let has_window = |id: &str| {
+        screen
+            .apps
+            .iter()
+            .find(|app| app.id == id)
+            .unwrap()
+            .has_window
+    };
+    assert!(has_window("msedge"));
+    assert!(!has_window("spotify"));
 }

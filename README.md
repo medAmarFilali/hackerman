@@ -26,8 +26,9 @@ Hackerman is built for desks with many monitors:
 It also shares the clipboard (text, formatted text, images and files of any size), has
 keyboard shortcuts for jumping between computers and for keeping the cursor where it is, and
 can hold the cursor back during full-screen games or until you push against an edge.
-You can drop files on a screen to save them on that computer. One button turns all of it
-off on a computer, and there are light and dark themes.
+You can drop files on a screen to save them on that computer, see what's on each screen, and
+bring up apps or move them between screens from the canvas. One button turns all of it off on
+a computer, and there are light and dark themes.
 
 > **Status:** early development, Windows only so far. Dragging a file straight across from
 > one computer's screen to another's, the Windows login screen, and macOS and Linux are
@@ -150,9 +151,19 @@ next or previous track. Where there isn't one, as with a film, they go 10 second
 Stremio doesn't tell Windows what it's doing, so its button can't show whether it's playing,
 and it's sent Stremio's own keys: Space and the left and right arrows.
 
+**Clicking an app** brings it to the front on the computer it's on, and restores it if it's
+minimized. If it has windows on several screens, that's its window on the screen you clicked.
+
+**Dragging an app** to another screen of the same computer moves its windows from that screen
+there, whether they're normal, maximized or minimized. It can't go to another computer's screen,
+as its windows belong to that computer. Windows doesn't let an ordinary program move an
+administrator's window, so those stay where they are unless Hackerman is running as
+administrator there.
+
 **Settings > Apps & media** turns the icons and the buttons off, on this computer's canvas, and
-can stop other computers seeing what's open here or controlling what's playing here. A locked
-computer does neither. All your computers need this version for any of this.
+can stop other computers seeing what's open here, controlling what's playing here, or bringing up
+and moving apps here. A locked computer does none of these. All your computers need this version
+for any of this.
 
 ### What's on the screens
 
@@ -312,7 +323,7 @@ Turning the switch off removes all of it, and so does uninstalling Hackerman.
 | `crates/hk-core` | Monitor layout, crossing logic, and the switcher that decides which computer gets input. Pure Rust, no OS calls. |
 | `crates/hk-proto` | Messages exchanged between computers and their binary encoding. |
 | `crates/hk-net` | Encrypted QUIC links, device identities, pairing and network discovery. |
-| `crates/hk-platform` | Input capture and replay, and reading the monitors. Windows only so far. |
+| `crates/hk-platform` | Input capture and replay, the monitors, apps' windows and pictures of the screens. Windows only so far. |
 | `crates/hk-ipc` | The private local channel between the app and the agent. |
 | `crates/hk-daemon` | The background agent, which ties everything together. |
 | `crates/hk-win-service` | The optional Windows service that makes the lock screen work. |

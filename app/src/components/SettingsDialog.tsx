@@ -608,6 +608,12 @@ function AppsAndMedia({
         checked={rules.mediaControl}
         onChange={(mediaControl) => update({ mediaControl })}
       />
+      <SwitchRow
+        label="Let other PCs bring up and move apps here"
+        description="Clicking an app on the canvas brings it to the front on its PC, and dragging it to another of that PC's screens moves its windows there."
+        checked={rules.appControl}
+        onChange={(appControl) => update({ appControl })}
+      />
     </>
   );
 }
