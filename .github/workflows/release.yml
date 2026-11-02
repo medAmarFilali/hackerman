@@ -1,0 +1,107 @@
+name: Release
+
+# Pushing a tag like v1.2.3 checks everything, builds it and publishes a release.
+# Running this by hand is a trial: it builds everything and publishes nothing.
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  checks:
+    uses: ./.github/workflows/ci.yml
+
+  release:
+    needs: checks
+    runs-on: windows-latest
+    permissions:
+      contents: write
+      id-token: write
+      attestations: write
+    steps:
+      - uses: actions/checkout@v5
+      - run: rustup toolchain install
+      - uses: Swatinem/rust-cache@v2
+      - uses: pnpm/action-setup@v4
+        with:
+          package_json_file: app/package.json
+      - uses: actions/setup-node@v5
+        with:
+          node-version: lts/*
+          cache: pnpm
+          cache-dependency-path: app/pnpm-lock.yaml
+
+      - name: Work out the version
+        id: version
+        run: |
+          $version = node -p "require('./app/package.json').version"
+          if ($env:GITHUB_REF_TYPE -eq 'tag' -and $env:GITHUB_REF_NAME -ne "v$version") {
+            throw "The tag $env:GITHUB_REF_NAME doesn't match the version $version"
+          }
+          "version=$version" >> $env:GITHUB_OUTPUT
+
+      - run: pnpm install --frozen-lockfile
+        working-directory: app
+      - run: pnpm tauri build
+        working-directory: app
+
+      # Only the agent, which needs no screen, on a channel and in a folder of its own.
+      - name: Check that the program starts
+        run: |
+          $env:USERNAME = 'release-check'
+          $env:APPDATA = "$env:RUNNER_TEMP\release-check"
+          New-Item -ItemType Directory -Force $env:APPDATA | Out-Null
+          $agent = Start-Process target\release\hackerman.exe -ArgumentList '--agent' -PassThru
+          $pipe = 'hackerman-release-check'
+          $started = $false
+          foreach ($attempt in 1..60) {
+            if ($agent.HasExited) { throw "The agent stopped, with code $($agent.ExitCode)" }
+            if ([System.IO.Directory]::GetFiles('\\.\pipe\') -match $pipe) { $started = $true; break }
+            Start-Sleep -Milliseconds 500
+          }
+          if (-not $started) { throw 'The agent never opened its channel' }
+          Stop-Process -Id $agent.Id -Force
+          Write-Output 'The agent started and opened its channel.'
+
+      - name: Gather the downloads
+        run: |
+          $version = '${{ steps.version.outputs.version }}'
+          New-Item -ItemType Directory -Force downloads, portable | Out-Null
+          Copy-Item "target\release\bundle\nsis\Hackerman_${version}_x64-setup.exe" downloads\
+          Copy-Item target\release\hackerman.exe, LICENSE-MIT, LICENSE-APACHE, THIRD-PARTY-NOTICES.md portable\
+          Compress-Archive -Path portable\* -DestinationPath "downloads\Hackerman_${version}_x64-portable.zip"
+          Copy-Item THIRD-PARTY-NOTICES.md downloads\
+          Push-Location downloads
+          $sums = Get-ChildItem -File | ForEach-Object {
+            '{0}  {1}' -f (Get-FileHash $_.Name -Algorithm SHA256).Hash.ToLower(), $_.Name
+          }
+          [IO.File]::WriteAllLines("$PWD\SHA256SUMS.txt", $sums)
+          Pop-Location
+          Get-Content downloads\SHA256SUMS.txt
+
+      - uses: actions/upload-artifact@v4
+        if: github.ref_type != 'tag'
+        with:
+          name: trial-downloads
+          path: downloads
+          retention-days: 3
+
+      - uses: actions/attest-build-provenance@v4
+        if: github.ref_type == 'tag'
+        with:
+          subject-path: |
+            downloads/*.exe
+            downloads/*.zip
+
+      - name: Publish the release
+        if: github.ref_type == 'tag'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $version = '${{ steps.version.outputs.version }}'
+          node scripts/release-notes.mjs $version > release-notes.md
+          $files = Get-ChildItem downloads -File | ForEach-Object { $_.FullName }
+          gh release create $env:GITHUB_REF_NAME $files --title "Hackerman $version" --notes-file release-notes.md --verify-tag
