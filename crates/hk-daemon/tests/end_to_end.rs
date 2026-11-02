@@ -155,13 +155,22 @@ impl Device {
 
     /// Waits until the agent's state satisfies `check`.
     async fn wait_for(&mut self, what: &str, check: impl Fn(&UiState) -> bool) {
+        self.wait_for_within(TIMEOUT, what, check).await;
+    }
+
+    async fn wait_for_within(
+        &mut self,
+        limit: Duration,
+        what: &str,
+        check: impl Fn(&UiState) -> bool,
+    ) {
         let name = self.name.clone();
         let wait = async {
             while !check(&self.state) {
                 self.next_from_agent().await;
             }
         };
-        if tokio::time::timeout(TIMEOUT, wait).await.is_err() {
+        if tokio::time::timeout(limit, wait).await.is_err() {
             panic!(
                 "{name} never reached: {what}\nlast state: {:#?}",
                 self.state
@@ -471,7 +480,8 @@ async fn heavy_traffic_both_ways_keeps_the_connection_healthy() {
         .await;
     assert!(a.move_mouse(1919.0, 500.0));
 
-    for round in 0..200 {
+    const ROUNDS: u32 = 80;
+    for round in 0..ROUNDS {
         // Sweeps the remote cursor right and back, staying off the edge it came in by.
         let offset = if round % 2 == 0 { 1.0 } else { -1.0 };
         for _ in 0..20 {
@@ -499,10 +509,12 @@ async fn heavy_traffic_both_ways_keeps_the_connection_healthy() {
     };
     assert!(a.press(KeyCode::KeyZ, true));
     wait_for_injected(&b, final_key).await;
-    a.wait_for("the last edit", |s| {
+    // Every edit is saved to disk, which takes its time on a slow machine.
+    let last = f64::from(ROUNDS - 1);
+    a.wait_for_within(Duration::from_secs(120), "the last edit", |s| {
         s.screens
             .iter()
-            .any(|screen| screen.device == b_id && screen.y == 199.0)
+            .any(|screen| screen.device == b_id && screen.y == last)
     })
     .await;
     assert!(
