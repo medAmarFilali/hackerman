@@ -29,6 +29,10 @@
     "targets": ["nsis"],
     "icon": ["icons/32x32.png", "icons/128x128.png", "icons/128x128@2x.png", "icons/icon.icns", "icons/icon.ico"],
     "shortDescription": "Share one keyboard and mouse across several computers",
+    "publisher": "Hackerman",
+    "copyright": "Copyright (c) 2026 The Hackerman Contributors",
+    "homepage": "https://github.com/medAmarFilali/hackerman",
+    "resources": { "../../THIRD-PARTY-NOTICES.md": "THIRD-PARTY-NOTICES.md" },
     "licenseFile": "../../LICENSE-MIT",
     "windows": {
       "nsis": { "installMode": "currentUser", "installerHooks": "windows/hooks.nsh" }
