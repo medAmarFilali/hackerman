@@ -1,0 +1,44 @@
+name: Bug report
+description: Something isn't working
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        For a security problem, please use **Report a vulnerability** on the Security tab instead.
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened?
+      description: What you did, what you expected, and what happened instead.
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: Hackerman version
+      description: It's at the top of the window, next to the name.
+      placeholder: "0.10.0"
+    validations:
+      required: true
+  - type: input
+    id: windows
+    attributes:
+      label: Windows version
+      placeholder: Windows 11 24H2
+    validations:
+      required: true
+  - type: textarea
+    id: setup
+    attributes:
+      label: Your setup
+      description: How many computers and screens, and which computer had the keyboard and the cursor.
+  - type: textarea
+    id: log
+    attributes:
+      label: Log
+      description: |
+        From `%APPDATA%\Hackerman\agent.log`, on the computer with the keyboard and the one with the
+        cursor. Copy it before restarting Hackerman, which starts a new one. Have a look through it
+        first, as it can include computer names, addresses and file names.
+      render: text
