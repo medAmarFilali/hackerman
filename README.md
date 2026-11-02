@@ -3,6 +3,15 @@
 Share one keyboard and mouse across several computers on your network. Move the
 cursor off the edge of one screen and it appears on the next computer.
 
+[![Latest release](https://img.shields.io/github/v/release/medAmarFilali/hackerman)](https://github.com/medAmarFilali/hackerman/releases/latest)
+[![CI](https://github.com/medAmarFilali/hackerman/actions/workflows/ci.yml/badge.svg)](https://github.com/medAmarFilali/hackerman/actions/workflows/ci.yml)
+[![License: MIT or Apache-2.0](https://img.shields.io/badge/license-MIT%20or%20Apache--2.0-blue)](#license)
+
+**[Download for Windows](https://github.com/medAmarFilali/hackerman/releases/latest)** · free and
+open source · no account · no server
+
+![Hackerman's canvas: three computers and their screens, arranged the way they sit on the desk, with the apps open on each one](docs/screenshot.png)
+
 Hackerman is built for desks with many monitors:
 
 - **Free-form layout.** Drag every monitor of every computer onto one canvas, at
@@ -34,22 +43,53 @@ a computer, and there are light and dark themes.
 > one computer's screen to another's, the Windows login screen, and macOS and Linux are
 > planned.
 
-## Trying it
+## Download and set up
 
-Windows 10 or 11, on two or more computers on the same network.
+Windows 10 or 11 (64-bit), on two or more computers on the same network.
 
-1. Get `hackerman.exe` onto each computer and open it. It needs no installation. (If
-   you prefer, `Hackerman_x.y.z_x64-setup.exe` installs it instead.)
-2. When Windows Firewall asks, **allow it on private networks**. If your network is
+1. On each computer, get the installer, `Hackerman_x.y.z_x64-setup.exe`, from the
+   [latest release](https://github.com/medAmarFilali/hackerman/releases/latest), and run it. If
+   you'd rather not install anything, the `portable.zip` there has a `hackerman.exe` that
+   runs as it is, on any computer that has Microsoft Edge WebView2, as Windows 11 does.
+2. These builds aren't code-signed yet, so Windows may say **Windows protected your PC**. Choose
+   **More info**, then **Run anyway**. Some antivirus programs may also object, since a program
+   that shares a keyboard and mouse has to watch and send input. See
+   [Checking a download](#checking-a-download).
+3. When Windows Firewall asks, **allow it on private networks**. If your network is
    set to Public in Windows, set it to Private: the firewall otherwise blocks other
    computers from finding this one.
-3. The computers appear under **On your network**, with their make and model when
+4. The computers appear under **On your network**, with their make and model when
    Windows knows them. Click **Pair** on one of them, and type the code that appears on
    the other. If one doesn't appear, pair by typing its IP address, which is shown under
    **This PC** on that computer.
-4. Drag the screens on the canvas. A violet band is where your cursor can cross.
-5. Push the cursor through a violet band. **Ctrl+Alt+Home** always brings control
+5. Drag the screens on the canvas. A violet band is where your cursor can cross.
+6. Push the cursor through a violet band. **Ctrl+Alt+Home** always brings control
    back, and it also comes back by itself if the connection drops.
+
+Pairing is a real decision: a paired computer can type and click on this one. [SECURITY.md](SECURITY.md)
+says exactly what it can do.
+
+### Updating and uninstalling
+
+Hackerman doesn't update itself or contact anything outside your network, so watch the
+[releases page](https://github.com/medAmarFilali/hackerman/releases) for new versions. To update,
+run the new installer over the old one. To uninstall, use **Installed apps** in Windows' settings.
+
+### Checking a download
+
+Each release is built from its tagged source by [GitHub Actions](.github/workflows/release.yml), in
+the open. `SHA256SUMS.txt` on the release lists what each file should hash to:
+
+```powershell
+Get-FileHash .\Hackerman_x.y.z_x64-setup.exe -Algorithm SHA256
+```
+
+With the [GitHub CLI](https://cli.github.com), you can also check that a file really was built by
+this repository's workflow:
+
+```sh
+gh attestation verify Hackerman_x.y.z_x64-setup.exe --repo medAmarFilali/hackerman
+```
 
 With three or more computers, pair each one with every other. The cursor can cross
 between computers that are only paired through a third, but the clipboard and files go
@@ -331,11 +371,9 @@ Turning the switch off removes all of it, and so does uninstalling Hackerman.
 
 ## Contributing
 
-Hackerman is written from scratch. Please don't copy code from GPL-licensed projects
-such as Lan Mouse, Input Leap or Deskflow, since their license is not compatible with
-ours. Reading them for ideas is fine.
-
-`cargo deny check` must pass; it rejects dependencies with copyleft licenses.
+Bug reports, fixes and ideas are welcome: see [CONTRIBUTING.md](CONTRIBUTING.md). For a security
+problem, see [SECURITY.md](SECURITY.md). What changed in each version is in
+[CHANGELOG.md](CHANGELOG.md).
 
 ## License
 
@@ -344,7 +382,8 @@ Licensed under either of
 - Apache License, Version 2.0 ([LICENSE-APACHE](LICENSE-APACHE))
 - MIT license ([LICENSE-MIT](LICENSE-MIT))
 
-at your option.
+at your option. The open-source components it's built from are listed in
+[THIRD-PARTY-NOTICES.md](THIRD-PARTY-NOTICES.md).
 
 Unless you explicitly state otherwise, any contribution intentionally submitted for
 inclusion in the work by you, as defined in the Apache-2.0 license, shall be dual
