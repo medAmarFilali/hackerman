@@ -1,0 +1,22 @@
+name: macOS
+
+# Hackerman doesn't run on macOS yet, and its runners can keep a job waiting for a long time, so
+# this doesn't hold anything up. Run it by hand to see whether the shared code still builds there.
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  test:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v5
+      - run: rustup toolchain install
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo clippy --workspace --exclude hackerman-app --all-targets -- -D warnings
+      - run: cargo test --workspace --exclude hackerman-app
