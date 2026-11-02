@@ -264,6 +264,10 @@ async fn answer(request: FileRequest, mut writer: DataWriter, offered: OfferedFi
 
 async fn open_at(path: &Path, offset: u64) -> io::Result<tokio::fs::File> {
     let mut file = tokio::fs::File::open(path).await?;
+    // Some systems let a folder be opened, and only fail once it's read.
+    if !file.metadata().await?.is_file() {
+        return Err(io::Error::other("it isn't a file"));
+    }
     file.seek(io::SeekFrom::Start(offset)).await?;
     Ok(file)
 }
