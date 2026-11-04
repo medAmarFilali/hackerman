@@ -273,11 +273,11 @@ and of the one the cursor was on.
 
 ### Known limits for now
 
-- Input can't reach administrator windows, the lock screen or the login screen.
-  Running Hackerman as administrator handles administrator windows, but Windows then
-  stops you dragging files into it from an ordinary File Explorer window.
-- A computer's input can't be captured while one of its own administrator windows
-  has focus, unless Hackerman is running as administrator there.
+- Input can't reach programs running as administrator, the lock screen or the sign-in
+  screen, and a computer's keyboard and mouse can't go to another while one of its own
+  administrator programs is in front. Turning on
+  [the lock screen and admin programs](#the-lock-screen-and-administrator-programs) on that
+  computer fixes all of these.
 - Games that read raw mouse movement may not respond to the mouse, because it's sent
   as positions.
 - Ctrl+Alt+Del always goes to the computer you pressed it on.
@@ -328,28 +328,48 @@ and the layout with only one real computer:
 cargo run -p hk-daemon -- --simulate 2 --config-dir some/empty/folder --port 24860 --channel '\\.\pipe\hackerman-sim'
 ```
 
-## The lock screen
+## The lock screen and administrator programs
 
-Hackerman can also work at the lock screen and the sign-in screen, so that you can type your
-password from another PC, even right after a restart. Turn it on for each PC under
-**Settings > General > Work at the lock screen**. Windows asks for administrator permission,
-because this takes a small service running as the system. It's copied to
-`C:\Program Files\Hackerman Lock Screen`, and it keeps a copy of Hackerman's settings where only
-administrators can read it. It uses the settings of whoever turned it on, whoever else signs in.
+Windows keeps an ordinary program like Hackerman away from the lock screen, the sign-in screen,
+and programs running as administrator. Without help, the cursor freezes over an administrator's
+program on the computer it's on, and the keyboard and mouse of a computer with one in front
+can't go to the others.
+
+Hackerman can work with all of these, so that you can type your password from another PC, even
+right after a restart, and use programs like a terminal opened as administrator. Turn it on for
+each PC under **Settings > General > Work at the lock screen and in admin programs**. Windows
+asks for administrator permission, because this takes a small service running as the system.
+It's copied to `C:\Program Files\Hackerman Lock Screen`, and it keeps a copy of Hackerman's
+settings where only administrators can read it. It uses the settings of whoever turned it on,
+whoever else signs in.
+
+While that person is using the PC, the service also runs a helper on their desktop that does
+Hackerman's keyboard and mouse work, since Windows lets it. Hackerman still decides everything,
+and the helper has no network or settings of its own. If it's slow to get an answer, or isn't
+running, Hackerman does the work itself as it always has.
 
 Before you turn it on:
 
 - **Using a paired PC becomes like sitting at this one's keyboard**, even before anyone has
   signed in. Only turn it on if you'd trust everyone who uses your paired PCs with that.
-- **Only the PCs you approve can reach it.** Turning it on approves the PCs you're paired with
-  then. A PC you pair later can't reach the lock screen until you allow it in the same place, which
-  also takes administrator permission. Forgetting a PC takes it off straight away.
+- **Only the PCs you approve can reach the lock screen.** Turning it on approves the PCs you're
+  paired with then. A PC you pair later can't reach the lock screen until you allow it in the same
+  place, which also takes administrator permission. Forgetting a PC takes it off straight away.
+  Administrator programs are for every PC you're paired with, as everything else is.
+- **Programs running as you could use it too**, to type into programs running as administrator
+  and see what's typed into them. Windows' line between the two was never meant to stop a program
+  that's already running on your account, and the same goes for other programs that share a
+  keyboard and mouse. See [SECURITY.md](SECURITY.md).
+- **It only works for whoever turned it on.** Someone else signing in to the PC gets Hackerman
+  as before. If it was turned on with an older version, use **Update it** in Settings first.
 - **A locked PC only receives.** Its own keyboard and mouse can't cross to your other PCs until
   it's unlocked, and nothing it does can get in the way of typing on it. The clipboard and files
   aren't shared while it's locked, and locking a PC stops any file transfer it's in the middle of.
   Files copied from another PC have to be copied again after unlocking.
-- **It doesn't reach administrator prompts** on a PC that's in use, or send Ctrl+Alt+Del. If
-  sign-in is set to require Ctrl+Alt+Del, you'd have to press that on the PC itself.
+- **It doesn't reach administrator prompts** on a PC that's in use, the ones asking whether to let
+  a program make changes, or send Ctrl+Alt+Del. If sign-in is set to require Ctrl+Alt+Del, you'd
+  have to press that on the PC itself.
+- **Moving an administrator's window** to another screen, from the canvas, still doesn't work.
 - **The Disable button still applies.** A disabled PC accepts nothing at the lock screen either.
   The copy of the settings catches up within about ten seconds of a change.
 - **After updating Hackerman**, Settings offers to update it as well.
@@ -366,7 +386,7 @@ Turning the switch off removes all of it, and so does uninstalling Hackerman.
 | `crates/hk-platform` | Input capture and replay, the monitors, apps' windows and pictures of the screens. Windows only so far. |
 | `crates/hk-ipc` | The private local channel between the app and the agent. |
 | `crates/hk-daemon` | The background agent, which ties everything together. |
-| `crates/hk-win-service` | The optional Windows service that makes the lock screen work. |
+| `crates/hk-win-service` | The optional Windows service that makes the lock screen and administrator programs work. |
 | `app` | The desktop app: Tauri, React, TypeScript and shadcn/ui. |
 
 ## Contributing

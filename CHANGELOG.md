@@ -3,6 +3,16 @@
 Downloads are on the [releases page](https://github.com/medAmarFilali/hackerman/releases).
 Versions before 0.10.0 weren't published.
 
+## Unreleased
+
+### Fixed
+
+- **Programs running as administrator.** The cursor froze over a program running as
+  administrator, and a computer's keyboard and mouse couldn't go to another one while such a
+  program was in front. Both work once **Settings > General > Work at the lock screen and in
+  admin programs** is on for that computer. If it was on already, use the **Update it** button
+  there.
+
 ## 0.10.0
 
 ### Added

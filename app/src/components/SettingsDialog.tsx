@@ -369,8 +369,8 @@ function LockScreen({ open }: { open: boolean }) {
   return (
     <div className="flex flex-col gap-2">
       <SwitchRow
-        label="Work at the lock screen"
-        description="Lets the keyboard and mouse of your paired PCs reach this PC's lock screen and sign-in screen, even right after a restart, so you can type your password from another PC. Anyone using one of those PCs could do that too. PCs you pair later have to be allowed here. The clipboard and files aren't shared while it's locked. Windows asks for administrator permission."
+        label="Work at the lock screen and in admin programs"
+        description="Lets the keyboard and mouse of your paired PCs reach this PC's lock screen and sign-in screen, even right after a restart, so you can type your password from another PC. They also reach programs running as administrator here, and this PC's keyboard and mouse can go to your other PCs while one of those is in front. Anyone using one of those PCs could do that too. PCs you pair later have to be allowed here to reach the lock screen. The clipboard and files aren't shared while it's locked. Windows asks for administrator permission."
         checked={status.on}
         disabled={busy}
         onChange={(on) => void change(on)}

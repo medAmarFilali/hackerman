@@ -36,6 +36,13 @@ at it, whatever else is switched off. On top of that:
   **Settings > Screens**, which is off by default.
 - It can reach the lock and sign-in screens only if you turned that feature on, and approved that
   computer with administrator rights.
+- It can reach programs running as administrator only if you turned that same feature on. Then
+  programs running on your account here could use Hackerman's helper too, to type into those
+  programs and to see what's typed into them. If Windows is set to show its "allow this app to
+  make changes" prompts on the ordinary desktop, rather than the dimmed secure one it uses by
+  default, they could answer those too. Windows doesn't treat the line between your programs and
+  administrator programs as a security boundary, and other programs that share a keyboard and
+  mouse across PCs have the same trade-off.
 
 Only pair computers you trust, and forget one you no longer do.
 

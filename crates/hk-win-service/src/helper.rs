@@ -1,5 +1,5 @@
-//! Starts the helper as the system on the protected desktop. A process's account and desktop
-//! are both chosen when it's created, so this is about getting those right.
+//! Starts a helper as the system, on the protected desktop or the user's. A process's account
+//! and desktop are both chosen when it's created, so this is about getting those right.
 
 use std::path::Path;
 
@@ -20,7 +20,13 @@ use windows::Win32::System::Threading::{
 };
 use windows::core::{HSTRING, Owned, PCWSTR, PWSTR};
 
-use crate::HELPER_ARGUMENT;
+use crate::{HELPER_ARGUMENT, INPUT_HELPER_ARGUMENT};
+
+/// Every program has a desktop within a "window station". This is the protected one for the
+/// screens that come before anyone can use the computer.
+const PROTECTED_DESKTOP: &str = r"winsta0\Winlogon";
+/// The one people's programs are on.
+const USERS_DESKTOP: &str = r"winsta0\Default";
 
 /// A running helper, which stops when this is dropped.
 pub(crate) struct Helper {
@@ -37,16 +43,30 @@ fn wide(text: &str) -> Vec<u16> {
 }
 
 impl Helper {
-    /// Starts it in a session, which should be the one on the physical screen. Only the
-    /// system can do this, so it only works when running as the service.
-    pub(crate) fn start(program: &Path, session: u32) -> Result<Self> {
-        let mut command_line = wide(&format!(
-            "\"{}\" --agent {HELPER_ARGUMENT}",
-            program.display()
-        ));
-        // Every program has a desktop within a "window station". This is the protected
-        // one for the screens that come before anyone can use the computer.
-        let mut desktop = wide(r"winsta0\Winlogon");
+    /// Starts the lock-screen helper in a session, which should be the one on the physical
+    /// screen. Only the system can do this, so it only works when running as the service.
+    pub(crate) fn start_at_lock_screen(program: &Path, session: u32) -> Result<Self> {
+        Self::start(
+            program,
+            &format!("--agent {HELPER_ARGUMENT}"),
+            session,
+            PROTECTED_DESKTOP,
+        )
+    }
+
+    /// Starts the input helper for the agent of this account, in its session.
+    pub(crate) fn start_for_input(program: &Path, session: u32, account: &str) -> Result<Self> {
+        Self::start(
+            program,
+            &format!("{INPUT_HELPER_ARGUMENT} --user {account}"),
+            session,
+            USERS_DESKTOP,
+        )
+    }
+
+    fn start(program: &Path, arguments: &str, session: u32, desktop: &str) -> Result<Self> {
+        let mut command_line = wide(&format!("\"{}\" {arguments}", program.display()));
+        let mut desktop = wide(desktop);
         let startup = STARTUPINFOW {
             cb: size_of::<STARTUPINFOW>() as u32,
             lpDesktop: PWSTR(desktop.as_mut_ptr()),

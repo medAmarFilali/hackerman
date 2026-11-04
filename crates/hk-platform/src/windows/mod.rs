@@ -10,6 +10,7 @@ mod hook;
 mod inject;
 mod keymap;
 mod media;
+mod relay;
 mod rivals;
 mod screens;
 pub mod session;
@@ -19,7 +20,7 @@ pub use virtual_files::data_object;
 
 use std::cell::Cell;
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 use std::time::{Duration, Instant};
 
 use hk_core::apps::{AppAction, MediaCommand, RunningApp};
@@ -85,7 +86,8 @@ pub struct NativePlatform {
 
 #[derive(Debug, Clone, Copy)]
 enum Role {
-    /// The user's own agent.
+    /// The user's own agent. Its input work goes through the system's input helper while
+    /// that's there: see the `relay` module.
     Agent,
     /// Running as the system while the screen is locked. It only stays for testing when the
     /// screen is unlocked, which is the only way to try it out on a PC in use.
@@ -104,18 +106,120 @@ pub fn native_for_lock_screen(stays_when_unlocked: bool) -> Result<NativePlatfor
 }
 
 fn starting_up(role: Role) -> NativePlatform {
+    set_up_process();
+    let replayer = match role {
+        Role::Agent => inject::Replayer::start(|event| relay().replay(event)),
+        Role::Helper { .. } => inject::Replayer::start(|event| {
+            if session::follow_input_desktop() {
+                inject::inject(event);
+            }
+        }),
+    };
+    NativePlatform { role, replayer }
+}
+
+fn set_up_process() {
     // Without this, Windows reports scaled coordinates on high-DPI monitors.
     // It fails harmlessly if the awareness was already set.
     let _ = unsafe { SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2) };
     keep_running_at_full_speed();
-    let may_send = match role {
-        Role::Agent => || true,
-        Role::Helper { .. } => session::follow_input_desktop,
-    };
-    NativePlatform {
-        role,
-        replayer: inject::Replayer::start(may_send),
+}
+
+/// This program's own input work.
+#[derive(Clone)]
+struct Here;
+
+impl relay::Machine for Here {
+    type Hooks = hook::Hooks;
+
+    fn hook(&self, handler: InputHandler) -> Result<hook::Hooks, Error> {
+        hook::Hooks::start(handler)
     }
+
+    /// Already on the thread that replays input.
+    fn replay(&self, event: &InputEvent) {
+        inject::inject(event);
+    }
+
+    fn park(&self, at: Point) {
+        move_cursor(at);
+        cursor::hide_at(at);
+    }
+
+    fn restore(&self, to: Point) {
+        cursor::show();
+        move_cursor(to);
+    }
+
+    fn unhide(&self) {
+        cursor::show();
+    }
+}
+
+/// The agent's way to its input work. It only starts looking for the helper when there's
+/// input work to do, so that the app, which uses this module too, never takes the agent's place.
+fn relay() -> &'static Arc<relay::Relay<Here>> {
+    static RELAY: OnceLock<Arc<relay::Relay<Here>>> = OnceLock::new();
+    RELAY.get_or_init(|| {
+        relay::Relay::start(
+            Here,
+            relay::CHANNEL,
+            relay::HELPER_ACCOUNTS.map(String::from).to_vec(),
+            relay::LOOK_EVERY,
+        )
+    })
+}
+
+/// The input work the system's input helper does for an agent.
+#[derive(Clone)]
+struct ForTheAgent {
+    replayer: inject::Replayer,
+}
+
+/// The cursor is moved from the thread with the hooks, by way of the window that hides it. The
+/// helper's other thread is the one that passes on the agent's verdicts, which that thread may be
+/// waiting for, and nothing it does should depend on the hooks.
+impl relay::Machine for ForTheAgent {
+    type Hooks = hook::Hooks;
+
+    fn hook(&self, handler: InputHandler) -> Result<hook::Hooks, Error> {
+        hook::Hooks::start(handler)
+    }
+
+    fn replay(&self, event: &InputEvent) {
+        self.replayer.replay(*event);
+    }
+
+    fn park(&self, at: Point) {
+        if !cursor::hide_at(at) {
+            move_cursor(at);
+        }
+    }
+
+    fn restore(&self, to: Point) {
+        if !cursor::show_at(to) {
+            move_cursor(to);
+        }
+    }
+
+    fn unhide(&self) {
+        cursor::show();
+    }
+}
+
+/// Runs as the system's input helper, for the agent of the account with this security ID, on
+/// the desktop this program started on. It only returns if it can't go on. The channel can be
+/// given for testing.
+pub fn serve_input_helper(channel: Option<&str>, account: &str) -> Result<(), Error> {
+    set_up_process();
+    let input_error = |error: std::io::Error| Error::InputHelper(error.to_string());
+    let server =
+        relay::Server::create(channel.unwrap_or(relay::CHANNEL), account).map_err(input_error)?;
+    let machine = ForTheAgent {
+        replayer: inject::Replayer::start(inject::inject),
+    };
+    tracing::info!("waiting for the agent");
+    server.run(&machine).map_err(input_error)
 }
 
 /// Windows can run a program with no window in front on its slowest processors, at their
@@ -175,13 +279,17 @@ impl Platform for NativePlatform {
     }
 
     fn park_cursor(&self, at: Point) {
-        move_cursor(at);
-        cursor::hide_at(at);
+        match self.role {
+            Role::Agent => relay().park(at),
+            Role::Helper { .. } => relay::Machine::park(&Here, at),
+        }
     }
 
     fn restore_cursor(&self, to: Point) {
-        cursor::show();
-        move_cursor(to);
+        match self.role {
+            Role::Agent => relay().restore(to),
+            Role::Helper { .. } => relay::Machine::restore(&Here, to),
+        }
     }
 
     fn should_step_aside(&self) -> bool {
@@ -207,7 +315,10 @@ impl Platform for NativePlatform {
     }
 
     fn start_capture(&self, handler: InputHandler) -> Result<Capture, Error> {
-        hook::Hooks::start(handler).map(Capture::new)
+        match self.role {
+            Role::Agent => relay().capture(handler).map(Capture::new),
+            Role::Helper { .. } => hook::Hooks::start(handler).map(Capture::new),
+        }
     }
 
     fn fullscreen_app_in_front(&self) -> bool {

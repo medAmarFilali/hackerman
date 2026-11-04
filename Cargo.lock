@@ -1813,6 +1813,8 @@ dependencies = [
  "arboard",
  "hk-core",
  "png",
+ "postcard",
+ "serde",
  "thiserror 2.0.21",
  "tracing",
  "windows",

@@ -27,7 +27,7 @@ use hk_core::switcher::LocalEvent;
 pub use imp::{NativePlatform, native};
 
 #[cfg(windows)]
-pub use imp::{native_for_lock_screen, session};
+pub use imp::{native_for_lock_screen, serve_input_helper, session};
 
 /// For tests that hand files to Windows' paste code without going through the clipboard.
 #[cfg(windows)]
@@ -170,4 +170,6 @@ pub enum Error {
     Screen(String),
     #[error("an app's windows: {0}")]
     AppWindows(String),
+    #[error("the input helper: {0}")]
+    InputHelper(String),
 }

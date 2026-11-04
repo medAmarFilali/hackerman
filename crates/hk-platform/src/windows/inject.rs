@@ -2,7 +2,8 @@
 //! machine's own devices.
 //!
 //! Windows blocks input sent to windows of elevated (administrator) programs
-//! unless the sender is elevated too.
+//! unless the sender is elevated too. The system's input helper is, which is why the
+//! agent hands input to it while it's there: see the `relay` module.
 //!
 //! `SendInput` waits for every program with a low-level input hook on the computer, and any
 //! of them can be slow. So it gets a thread of its own: however long it takes, the connection
@@ -55,19 +56,16 @@ pub(super) struct Replayer {
 }
 
 impl Replayer {
-    /// `may_send` is asked before each event. The thread stops with the last of these.
-    pub(super) fn start(may_send: fn() -> bool) -> Self {
+    /// `replay` is what's done with each event on the thread, like [`inject`]. The thread
+    /// stops with the last of these.
+    pub(super) fn start(replay: impl Fn(&InputEvent) + Send + 'static) -> Self {
         let (jobs, queue) = mpsc::channel();
         let started = std::thread::Builder::new()
             .name("input-replay".into())
             .spawn(move || {
                 // SAFETY: this only concerns this thread, and a failure just leaves it as it is.
                 let _ = unsafe { SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_HIGHEST) };
-                run(&queue, |event| {
-                    if may_send() {
-                        inject(event);
-                    }
-                });
+                run(&queue, replay);
             });
         if let Err(error) = started {
             tracing::error!(%error, "can't start the thread that replays input");

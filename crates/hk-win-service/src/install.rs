@@ -8,7 +8,7 @@ use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, bail};
 use hk_daemon::lock_screen;
-use hk_platform::session::{HELPER_SERVICE, helper_service_running};
+use hk_platform::session::{self, HELPER_SERVICE, helper_service_running};
 use windows::Win32::Foundation::{ERROR_CANCELLED, HANDLE};
 use windows::Win32::Security::{GetTokenInformation, TOKEN_ELEVATION, TOKEN_QUERY, TokenElevation};
 use windows::Win32::System::Com::{
@@ -34,7 +34,8 @@ use crate::{INSTALL_ARGUMENT, REMOVE_ARGUMENT, SERVICE_ARGUMENT, paths};
 
 const DISPLAY_NAME: &str = "Hackerman Lock Screen";
 const DESCRIPTION: &str = "Lets the keyboard and mouse of your paired PCs reach this PC's lock \
-                           screen and sign-in screen. Turned on and off in Hackerman's Settings.";
+                           screen, sign-in screen and programs running as administrator. Turned \
+                           on and off in Hackerman's Settings.";
 const FIREWALL_RULE: &str = "Hackerman Lock Screen";
 /// How long to wait for the service to stop, and for its files to be free afterwards.
 const WAIT_FOR_STOP: Duration = Duration::from_secs(15);
@@ -86,8 +87,16 @@ fn not_allowed_yet() -> Result<Vec<String>> {
 /// the devices they're paired with now. Windows asks the user for permission first, so don't
 /// call this where waiting holds anything up.
 pub fn set_up_for_this_user() -> Elevated {
+    // Asked here, as the user: whoever gives administrator permission may be someone else.
+    let Some(account) = session::own_account() else {
+        tracing::warn!("can't tell which account this is");
+        return Elevated::Failed;
+    };
     match hk_daemon::default_config_dir() {
-        Ok(settings) => run_elevated(&format!("{INSTALL_ARGUMENT} \"{}\"", settings.display())),
+        Ok(settings) => run_elevated(&format!(
+            "{INSTALL_ARGUMENT} \"{}\" {account}",
+            settings.display()
+        )),
         Err(error) => {
             tracing::warn!("can't find this user's settings: {error:#}");
             Elevated::Failed
@@ -178,13 +187,19 @@ pub fn install_and_report(arguments: &[String]) -> Result<()> {
     if !is_elevated() {
         bail!("this needs administrator rights");
     }
-    let settings_from = arguments
-        .iter()
-        .position(|argument| argument == INSTALL_ARGUMENT)
-        .and_then(|at| arguments.get(at + 1))
+    let given = |after: usize| {
+        arguments
+            .iter()
+            .position(|argument| argument == INSTALL_ARGUMENT)
+            .and_then(|at| arguments.get(at + after))
+    };
+    let settings_from = given(1)
         .map(PathBuf::from)
         .context("which user's settings to use wasn't given")?;
-    let result = install(&settings_from);
+    let account = given(2)
+        .filter(|account| looks_like_an_account(account))
+        .context("which account this is for wasn't given")?;
+    let result = install(&settings_from, account);
     if let Err(error) = &result {
         let _ = remove();
         let _ = leave_a_note(&format!("{error:#}"));
@@ -211,7 +226,16 @@ fn leave_a_note(text: &str) -> Result<()> {
     Ok(())
 }
 
-fn install(settings_from: &Path) -> Result<()> {
+/// A security ID in text: it goes on the command line of a program run as the system.
+fn looks_like_an_account(text: &str) -> bool {
+    text.starts_with("S-1-")
+        && text.len() < 200
+        && text
+            .chars()
+            .all(|c| c.is_ascii_digit() || c == '-' || c == 'S')
+}
+
+fn install(settings_from: &Path, account: &str) -> Result<()> {
     // Before changing anything, in case there's nothing to set up from.
     let paired = lock_screen::paired_devices(settings_from)?;
     if !lock_screen::has_settings(settings_from) {
@@ -259,6 +283,7 @@ fn install(settings_from: &Path) -> Result<()> {
     Approval {
         settings_from: settings_from.to_path_buf(),
         devices,
+        account: Some(account.to_string()),
     }
     .save()?;
 
@@ -419,6 +444,17 @@ mod tests {
                 not_allowed_yet: vec![],
             }
         );
+    }
+
+    #[test]
+    fn only_a_security_id_is_taken_as_an_account() {
+        assert!(looks_like_an_account(
+            "S-1-5-21-4121067967-3424955396-1896628110-1001"
+        ));
+        assert!(looks_like_an_account(&session::own_account().unwrap()));
+        assert!(!looks_like_an_account("S-1-5-21 --channel x"));
+        assert!(!looks_like_an_account("someone"));
+        assert!(!looks_like_an_account(""));
     }
 
     #[test]

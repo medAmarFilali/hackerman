@@ -18,6 +18,10 @@ pub(crate) struct Approval {
     /// The only devices that can reach the lock screen, for as long as that user stays paired
     /// with them.
     pub(crate) devices: Vec<Fingerprint>,
+    /// That user's account, as its security ID: the only one the input helper works for.
+    /// Setting this up before there was an input helper didn't say.
+    #[serde(default)]
+    pub(crate) account: Option<String>,
 }
 
 impl Approval {
@@ -44,9 +48,20 @@ mod tests {
         let approval = Approval {
             settings_from: PathBuf::from(r"C:\Users\été\AppData\Roaming\Hackerman"),
             devices: vec![Fingerprint::from_bytes([7; 32])],
+            account: Some("S-1-5-21-1-2-3-1001".into()),
         };
         let text = serde_json::to_string(&approval).unwrap();
         assert!(text.contains("settingsFrom"));
         assert_eq!(serde_json::from_str::<Approval>(&text).unwrap(), approval);
+    }
+
+    /// From before there was an input helper. Without an account, it works for nobody.
+    #[test]
+    fn an_older_approval_still_reads() {
+        let approval: Approval = serde_json::from_str(
+            r#"{"settingsFrom":"C:\\Users\\a\\AppData\\Roaming\\Hackerman","devices":[]}"#,
+        )
+        .unwrap();
+        assert_eq!(approval.account, None);
     }
 }

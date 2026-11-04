@@ -1,4 +1,4 @@
-//! The service itself: it watches the screen, and starts and stops the helper to match.
+//! The service itself: it watches the screen, and starts and stops the helpers to match.
 
 use std::ffi::OsString;
 use std::fs::File;
@@ -11,6 +11,9 @@ use std::time::{Duration, Instant};
 use anyhow::{Context, Result};
 use hk_daemon::lock_screen;
 use hk_platform::session::{self, ConsoleState, HELPER_SERVICE};
+use windows::Win32::Foundation::HANDLE;
+use windows::Win32::System::RemoteDesktop::WTSQueryUserToken;
+use windows::core::Owned;
 use windows_service::service::{
     ServiceControl, ServiceControlAccept, ServiceExitCode, ServiceState, ServiceStatus, ServiceType,
 };
@@ -27,6 +30,21 @@ const CHECK_EVERY: Duration = Duration::from_millis(500);
 const COPY_EVERY: Duration = Duration::from_secs(10);
 /// How soon to try a helper again, after it stops or won't start.
 const TRY_AGAIN_AFTER: Duration = Duration::from_secs(3);
+/// How often to look again at who's signed in, while it isn't the user who set this up. Windows
+/// can take a moment after someone signs in to say who they are.
+const CHECK_USER_EVERY: Duration = Duration::from_secs(10);
+/// A helper that stops sooner than this after starting didn't get going at all.
+const QUICK_EXIT: Duration = Duration::from_secs(10);
+
+/// How long to wait before starting the input helper again, given how long it ran. One that
+/// stops straight away, as it does if something else has taken its pipe's name, would otherwise
+/// be started again every few seconds for as long as that lasts.
+fn try_again_after(ran_for: Option<Duration>) -> Duration {
+    match ran_for {
+        Some(ran) if ran < QUICK_EXIT => Duration::from_secs(60),
+        _ => TRY_AGAIN_AFTER,
+    }
+}
 
 define_windows_service!(service_entry, service_main);
 
@@ -38,7 +56,7 @@ pub fn run_service() -> Result<()> {
 }
 
 fn service_main(_arguments: Vec<OsString>) {
-    if let Err(error) = start_logging() {
+    if let Err(error) = start_logging("service.log") {
         // There's nowhere to report it. The service can do its job without a log.
         drop(error);
     }
@@ -47,8 +65,9 @@ fn service_main(_arguments: Vec<OsString>) {
     }
 }
 
-fn start_logging() -> Result<()> {
-    let log = File::create(paths::data_folder()?.join("service.log"))?;
+/// Logs to a file where only the system and administrators can read it.
+pub(crate) fn start_logging(name: &str) -> Result<()> {
+    let log = File::create(paths::data_folder()?.join(name))?;
     tracing_subscriber::fmt()
         .with_env_filter(hk_daemon::log_filter())
         .with_ansi(false)
@@ -97,21 +116,84 @@ enum Step {
     Stop,
 }
 
-/// What to do about the helper, given which session is on the screen and what's going on there,
-/// the session the helper is running in if it's running, and whether it has settings to run
-/// from. Windows not saying about the screen means it's in the middle of something, so
-/// nothing changes.
-fn next_step(console: Option<(u32, ConsoleState)>, helper: Option<u32>, ready: bool) -> Step {
-    let Some((session, state)) = console else {
+/// What to do about a helper, given which session is on the screen, the session the helper is
+/// running in if it's running, and whether it's wanted there. Windows not saying about the
+/// screen means it's in the middle of something, so nothing changes.
+fn next_step(console: Option<u32>, helper: Option<u32>, wanted: bool) -> Step {
+    let Some(session) = console else {
         return Step::Nothing;
     };
-    let wanted = ready && state.needs_helper();
     match helper {
         // In the wrong session, it can't reach the screen. Started again next time round.
         Some(running_in) if !wanted || running_in != session => Step::Stop,
         None if wanted => Step::Start,
         _ => Step::Nothing,
     }
+}
+
+/// The lock-screen helper is for the lock and sign-in screens, once it has settings to run
+/// from.
+fn wants_lock_screen_helper(state: ConsoleState, ready: bool) -> bool {
+    ready && state.needs_helper()
+}
+
+/// Who is using the computer, as far as the input helper goes.
+#[derive(Default)]
+struct SignedIn {
+    session: Option<u32>,
+    /// Their account, if they're the user who set this up.
+    approved: Option<String>,
+    checked: Option<Instant>,
+}
+
+impl SignedIn {
+    /// The account of whoever is signed in to this session, if it's the one that set this up.
+    fn approved(&mut self, session: u32) -> Option<String> {
+        let due = self.session != Some(session)
+            || (self.approved.is_none()
+                && self
+                    .checked
+                    .is_none_or(|at| at.elapsed() >= CHECK_USER_EVERY));
+        if due {
+            let first_look = self.session != Some(session);
+            self.session = Some(session);
+            self.checked = Some(Instant::now());
+            self.approved = approved_account(session)
+                .inspect_err(|error| tracing::warn!("{error:#}"))
+                .ok()
+                .flatten();
+            if first_look && self.approved.is_none() {
+                tracing::info!(
+                    session,
+                    "the user who set this up isn't the one signed in, so there's no input helper"
+                );
+            }
+        }
+        self.approved.clone()
+    }
+
+    fn forget(&mut self) {
+        *self = Self::default();
+    }
+}
+
+/// The account signed in to a session, if it's the user who set this up. The input helper only
+/// ever works for them: they're the one an administrator agreed to it for. Only what Windows
+/// says about the account counts, since anything the user can change, they could change to look
+/// like someone else.
+fn approved_account(session: u32) -> Result<Option<String>> {
+    let Some(approved) = Approval::load()?.account else {
+        return Ok(None);
+    };
+    // SAFETY: the token is owned as soon as it exists. Only the system can ask for it.
+    let token = unsafe {
+        let mut token = HANDLE::default();
+        WTSQueryUserToken(session, &raw mut token)
+            .context("can't tell who is signed in to the session on the screen")?;
+        Owned::new(token)
+    };
+    let account = session::account_of(*token).context("can't tell which account is signed in")?;
+    Ok((account == approved).then_some(account))
 }
 
 /// Whether to bring the helper's copy of the settings up to date. It goes on doing that while
@@ -160,32 +242,82 @@ fn supervise(stop: &Receiver<()>) -> Result<()> {
     let settings = paths::helper_settings()?;
     let copying = OneAtATime::default();
     let mut helper: Option<Helper> = None;
+    let mut input_helper: Option<Helper> = None;
     let mut last_start: Option<Instant> = None;
+    let mut last_input_start: Option<Instant> = None;
     let mut last_copy: Option<Instant> = None;
     let mut previous_state = None;
+    let mut signed_in = SignedIn::default();
+    let mut input_wait = TRY_AGAIN_AFTER;
+    let may_try =
+        |last: Option<Instant>, wait: Duration| last.is_none_or(|at| at.elapsed() >= wait);
 
     loop {
         let console = session::console_session()
             .and_then(|session| Some((session, session::console_state(session)?)));
+        let console_session = console.map(|(session, _)| session);
 
         if helper.as_ref().is_some_and(Helper::has_exited) {
-            tracing::info!("the helper stopped");
+            tracing::info!("the lock-screen helper stopped");
             helper = None;
+        }
+        if input_helper.as_ref().is_some_and(Helper::has_exited) {
+            input_wait = try_again_after(last_input_start.map(|at| at.elapsed()));
+            tracing::info!(
+                again_in_s = input_wait.as_secs(),
+                "the input helper stopped"
+            );
+            input_helper = None;
         }
 
         let ready = lock_screen::has_settings(&settings);
-        match next_step(console, helper.as_ref().map(Helper::session), ready) {
+        let wanted = console.is_some_and(|(_, state)| wants_lock_screen_helper(state, ready));
+        match next_step(
+            console_session,
+            helper.as_ref().map(Helper::session),
+            wanted,
+        ) {
             Step::Nothing => {}
             Step::Stop => {
-                tracing::info!("stopping the helper");
+                tracing::info!("stopping the lock-screen helper");
                 helper = None;
             }
             Step::Start => {
-                let may_try = last_start.is_none_or(|at| at.elapsed() >= TRY_AGAIN_AFTER);
-                if let (true, Some((session, _))) = (may_try, console) {
+                if let (true, Some(session)) =
+                    (may_try(last_start, TRY_AGAIN_AFTER), console_session)
+                {
                     last_start = Some(Instant::now());
-                    tracing::info!(session, "starting the helper");
-                    helper = Helper::start(&program, session)
+                    tracing::info!(session, "starting the lock-screen helper");
+                    helper = Helper::start_at_lock_screen(&program, session)
+                        .inspect_err(|error| tracing::error!("{error:#}"))
+                        .ok();
+                }
+            }
+        }
+
+        let account = match console {
+            Some((session, ConsoleState::Unlocked)) => signed_in.approved(session),
+            _ => {
+                signed_in.forget();
+                None
+            }
+        };
+        let running_in = input_helper.as_ref().map(Helper::session);
+        match next_step(console_session, running_in, account.is_some()) {
+            Step::Nothing => {}
+            Step::Stop => {
+                tracing::info!("stopping the input helper");
+                input_helper = None;
+            }
+            Step::Start => {
+                if let (true, Some(session), Some(account)) = (
+                    may_try(last_input_start, input_wait),
+                    console_session,
+                    &account,
+                ) {
+                    last_input_start = Some(Instant::now());
+                    tracing::info!(session, "starting the input helper");
+                    input_helper = Helper::start_for_input(&program, session, account)
                         .inspect_err(|error| tracing::error!("{error:#}"))
                         .ok();
                 }
@@ -228,49 +360,85 @@ mod tests {
     const SIGN_IN: Option<(u32, ConsoleState)> = Some((1, ConsoleState::NoUser));
     const IN_USE: Option<(u32, ConsoleState)> = Some((1, ConsoleState::Unlocked));
 
+    /// What to do about the lock-screen helper.
+    fn lock_screen(console: Option<(u32, ConsoleState)>, helper: Option<u32>, ready: bool) -> Step {
+        let wanted = console.is_some_and(|(_, state)| wants_lock_screen_helper(state, ready));
+        next_step(console.map(|(session, _)| session), helper, wanted)
+    }
+
     #[test]
     fn the_helper_starts_when_the_screen_locks_or_nobody_is_signed_in() {
-        assert_eq!(next_step(LOCKED, None, true), Step::Start);
-        assert_eq!(next_step(SIGN_IN, None, true), Step::Start);
+        assert_eq!(lock_screen(LOCKED, None, true), Step::Start);
+        assert_eq!(lock_screen(SIGN_IN, None, true), Step::Start);
     }
 
     #[test]
     fn the_helper_stops_when_someone_is_using_the_computer() {
-        assert_eq!(next_step(IN_USE, Some(1), true), Step::Stop);
-        assert_eq!(next_step(IN_USE, None, true), Step::Nothing);
+        assert_eq!(lock_screen(IN_USE, Some(1), true), Step::Stop);
+        assert_eq!(lock_screen(IN_USE, None, true), Step::Nothing);
     }
 
     #[test]
     fn a_running_helper_is_left_alone_while_it_is_needed() {
-        assert_eq!(next_step(LOCKED, Some(1), true), Step::Nothing);
-        assert_eq!(next_step(SIGN_IN, Some(1), true), Step::Nothing);
+        assert_eq!(lock_screen(LOCKED, Some(1), true), Step::Nothing);
+        assert_eq!(lock_screen(SIGN_IN, Some(1), true), Step::Nothing);
     }
 
     /// Someone else signing in, or logging out, gives the screen a new session.
     #[test]
     fn a_helper_in_a_session_no_longer_on_the_screen_is_stopped() {
         assert_eq!(
-            next_step(Some((2, ConsoleState::NoUser)), Some(1), true),
+            lock_screen(Some((2, ConsoleState::NoUser)), Some(1), true),
             Step::Stop
         );
         assert_eq!(
-            next_step(Some((2, ConsoleState::NoUser)), None, true),
+            lock_screen(Some((2, ConsoleState::NoUser)), None, true),
             Step::Start
         );
     }
 
     #[test]
     fn nothing_changes_while_windows_is_in_the_middle_of_something() {
-        assert_eq!(next_step(None, Some(1), true), Step::Nothing);
-        assert_eq!(next_step(None, None, true), Step::Nothing);
+        assert_eq!(lock_screen(None, Some(1), true), Step::Nothing);
+        assert_eq!(lock_screen(None, None, true), Step::Nothing);
     }
 
     /// Without this computer's identity it would be a stranger to every other PC.
     #[test]
     fn no_helper_without_settings_to_run_from() {
-        assert_eq!(next_step(LOCKED, None, false), Step::Nothing);
-        assert_eq!(next_step(SIGN_IN, None, false), Step::Nothing);
-        assert_eq!(next_step(LOCKED, Some(1), false), Step::Stop);
+        assert_eq!(lock_screen(LOCKED, None, false), Step::Nothing);
+        assert_eq!(lock_screen(SIGN_IN, None, false), Step::Nothing);
+        assert_eq!(lock_screen(LOCKED, Some(1), false), Step::Stop);
+    }
+
+    /// The input helper is wanted while the user who set this up is using the computer, which
+    /// the loop works out from the screen being unlocked and who's signed in.
+    #[test]
+    fn the_input_helper_comes_and_goes_with_the_user_who_set_this_up() {
+        assert_eq!(next_step(Some(1), None, true), Step::Start);
+        assert_eq!(next_step(Some(1), Some(1), true), Step::Nothing);
+        assert_eq!(
+            next_step(Some(1), Some(1), false),
+            Step::Stop,
+            "locked, or someone else"
+        );
+        assert_eq!(
+            next_step(Some(2), Some(1), true),
+            Step::Stop,
+            "another session"
+        );
+        assert_eq!(next_step(None, Some(1), false), Step::Nothing);
+    }
+
+    #[test]
+    fn a_helper_that_keeps_stopping_straight_away_is_tried_less_often() {
+        let soon = Duration::from_secs(1);
+        assert_eq!(try_again_after(None), TRY_AGAIN_AFTER, "it hasn't run yet");
+        assert_eq!(
+            try_again_after(Some(Duration::from_secs(600))),
+            TRY_AGAIN_AFTER
+        );
+        assert!(try_again_after(Some(soon)) > Duration::from_secs(30));
     }
 
     #[test]

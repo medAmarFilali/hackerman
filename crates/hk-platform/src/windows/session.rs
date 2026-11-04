@@ -8,7 +8,9 @@
 
 use std::cell::Cell;
 
-use windows::Win32::Foundation::{GENERIC_ALL, HANDLE};
+use windows::Win32::Foundation::{GENERIC_ALL, HANDLE, HLOCAL, LocalFree};
+use windows::Win32::Security::Authorization::ConvertSidToStringSidW;
+use windows::Win32::Security::{GetTokenInformation, PSID, TOKEN_QUERY, TOKEN_USER, TokenUser};
 use windows::Win32::System::RemoteDesktop::{
     ProcessIdToSessionId, WTS_CURRENT_SERVER_HANDLE, WTS_SESSIONSTATE_LOCK, WTSFreeMemory,
     WTSGetActiveConsoleSessionId, WTSINFOEXW, WTSQuerySessionInformationW, WTSSessionInfoEx,
@@ -21,8 +23,8 @@ use windows::Win32::System::StationsAndDesktops::{
     CloseDesktop, DESKTOP_ACCESS_FLAGS, DESKTOP_CONTROL_FLAGS, GetUserObjectInformationW, HDESK,
     OpenInputDesktop, SetThreadDesktop, UOI_NAME,
 };
-use windows::Win32::System::Threading::GetCurrentProcessId;
-use windows::core::{HSTRING, PCWSTR, PWSTR};
+use windows::Win32::System::Threading::{GetCurrentProcess, GetCurrentProcessId, OpenProcessToken};
+use windows::core::{HSTRING, Owned, PCWSTR, PWSTR};
 
 /// The name of the Windows service that looks after the helper.
 pub const HELPER_SERVICE: &str = "HackermanLockScreen";
@@ -216,6 +218,50 @@ fn desktop_name(desktop: HDESK) -> Option<String> {
 /// What Windows calls the desktop that people's programs are on.
 fn is_users_desktop(name: &str) -> bool {
     name.eq_ignore_ascii_case("Default")
+}
+
+/// The account this program is running as, as its security ID in text.
+pub fn own_account() -> Option<String> {
+    let mut token = HANDLE::default();
+    // SAFETY: the token is owned as soon as it exists.
+    unsafe {
+        OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &raw mut token).ok()?;
+        let token = Owned::new(token);
+        account_of(*token)
+    }
+}
+
+/// The account a token is for, as its security ID in text, like "S-1-5-21-…".
+pub fn account_of(token: HANDLE) -> Option<String> {
+    let mut size = 0;
+    // SAFETY: asking with no buffer only says how large it needs to be.
+    let _ = unsafe { GetTokenInformation(token, TokenUser, None, 0, &raw mut size) };
+    // In u64s, so that the structure Windows writes at the start is aligned.
+    let mut buffer = vec![0u64; (size as usize).div_ceil(8)];
+    // SAFETY: the buffer is the size Windows asked for, and is read as what it says it wrote.
+    unsafe {
+        GetTokenInformation(
+            token,
+            TokenUser,
+            Some(buffer.as_mut_ptr().cast()),
+            size,
+            &raw mut size,
+        )
+        .ok()?;
+        sid_text((*buffer.as_ptr().cast::<TOKEN_USER>()).User.Sid)
+    }
+}
+
+/// A security ID as text.
+pub(super) fn sid_text(sid: PSID) -> Option<String> {
+    let mut text = PWSTR::null();
+    // SAFETY: Windows allocates the text, which is copied and then freed.
+    unsafe {
+        ConvertSidToStringSidW(sid, &raw mut text).ok()?;
+        let copy = text.to_string().ok();
+        LocalFree(Some(HLOCAL(text.0.cast())));
+        copy
+    }
 }
 
 #[cfg(test)]

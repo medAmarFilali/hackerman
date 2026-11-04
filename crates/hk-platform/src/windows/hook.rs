@@ -61,7 +61,7 @@ thread_local! {
 
 /// Logs from another thread, since writing to a file could hold up this one, and with it all
 /// input on the computer. This only happens when something has already gone wrong.
-fn report(log: impl FnOnce() + Send + 'static) {
+pub(super) fn report(log: impl FnOnce() + Send + 'static) {
     let _ = std::thread::Builder::new().spawn(log);
 }
 

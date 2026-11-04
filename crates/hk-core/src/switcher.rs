@@ -18,6 +18,8 @@
 use std::collections::HashSet;
 use std::time::Duration;
 
+use serde::{Deserialize, Serialize};
+
 use crate::apps::MediaCommand;
 use crate::device::Fingerprint;
 use crate::geometry::{Point, Rect};
@@ -29,8 +31,9 @@ use crate::rules::{CrossModifier, Rules, Shortcut};
 /// Nearer than this can be a single report from the mouse.
 const PARKED_CURSOR_MOVED: f64 = 150.0;
 
-/// Input from this machine's own keyboard and mouse.
-#[derive(Debug, Clone, Copy, PartialEq)]
+/// Input from this machine's own keyboard and mouse. On Windows it can come from another
+/// program on the same machine, which is what serializing it is for.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub enum LocalEvent {
     /// The cursor is about to move from one position to another. Where it is now
     /// has to come from the operating system at that moment: a remembered position
@@ -48,6 +51,7 @@ pub enum LocalEvent {
         dy: f64,
     },
     Key {
+        #[serde(with = "crate::input::key_code_by_name")]
         code: KeyCode,
         pressed: bool,
     },

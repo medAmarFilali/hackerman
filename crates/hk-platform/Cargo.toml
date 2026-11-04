@@ -15,5 +15,7 @@ tracing.workspace = true
 [target.'cfg(windows)'.dependencies]
 arboard.workspace = true
 png.workspace = true
+postcard.workspace = true
+serde.workspace = true
 windows.workspace = true
 windows-core.workspace = true

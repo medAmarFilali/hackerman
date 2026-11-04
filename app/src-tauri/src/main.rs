@@ -17,6 +17,8 @@ fn main() {
             finish(lock_screen::install_and_report(&arguments));
         } else if given(lock_screen::REMOVE_ARGUMENT) {
             finish(lock_screen::remove_and_report());
+        } else if given(lock_screen::INPUT_HELPER_ARGUMENT) {
+            finish(lock_screen::run_input_helper(&arguments));
         } else if given(hackerman_app::AGENT_ARGUMENT) && given(lock_screen::HELPER_ARGUMENT) {
             finish(lock_screen::run_helper(&arguments));
         }

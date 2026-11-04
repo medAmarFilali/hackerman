@@ -30,6 +30,7 @@ const SIZE: i32 = 64;
 
 const SHOW_AT: u32 = WM_APP + 1;
 const HIDE: u32 = WM_APP + 2;
+const HIDE_AND_MOVE: u32 = WM_APP + 3;
 
 static WINDOW: AtomicPtr<core::ffi::c_void> = AtomicPtr::new(std::ptr::null_mut());
 
@@ -82,18 +83,30 @@ pub(super) fn destroy() {
     }
 }
 
-pub(super) fn hide_at(at: Point) {
-    if let Some(window) = window() {
-        let x = WPARAM(at.x.round() as i32 as usize);
-        let y = LPARAM(at.y.round() as i32 as isize);
-        let _ = unsafe { PostMessageW(Some(window), SHOW_AT, x, y) };
-    }
+/// Moves the cursor here and hides it, from the window's thread. Says whether there's a window.
+pub(super) fn hide_at(at: Point) -> bool {
+    post_at(SHOW_AT, at)
 }
 
 pub(super) fn show() {
     if let Some(window) = window() {
         let _ = unsafe { PostMessageW(Some(window), HIDE, WPARAM(0), LPARAM(0)) };
     }
+}
+
+/// Shows the cursor again, here, with the move made from the window's thread. Says whether
+/// there's a window. A thread waiting on that one, as the input helper's can, can't hold it up.
+pub(super) fn show_at(to: Point) -> bool {
+    post_at(HIDE_AND_MOVE, to)
+}
+
+fn post_at(message: u32, at: Point) -> bool {
+    let Some(window) = window() else {
+        return false;
+    };
+    let x = WPARAM(at.x.round() as i32 as usize);
+    let y = LPARAM(at.y.round() as i32 as isize);
+    unsafe { PostMessageW(Some(window), message, x, y) }.is_ok()
 }
 
 unsafe extern "system" fn window_proc(
@@ -128,7 +141,7 @@ unsafe extern "system" fn window_proc(
             inject::nudge_nowhere();
             LRESULT(0)
         }
-        HIDE => {
+        HIDE | HIDE_AND_MOVE => {
             let _ = unsafe {
                 SetWindowPos(
                     window,
@@ -140,6 +153,10 @@ unsafe extern "system" fn window_proc(
                     SWP_HIDEWINDOW | SWP_NOACTIVATE | SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER,
                 )
             };
+            if message == HIDE_AND_MOVE {
+                let (x, y) = (wparam.0 as i32, lparam.0 as i32);
+                let _ = unsafe { SetCursorPos(x, y) };
+            }
             // So whatever window is under the cursor now sets the cursor shape,
             // rather than leaving it hidden until the mouse next moves.
             inject::nudge_nowhere();

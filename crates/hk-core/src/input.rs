@@ -106,7 +106,7 @@ impl Held {
 /// Serializes key codes by their W3C name ("KeyA") instead of the derived
 /// variant index, so peers built against different keyboard-types versions
 /// still agree on which key is which.
-mod key_code_by_name {
+pub(crate) mod key_code_by_name {
     use super::KeyCode;
     use serde::{Deserialize, Deserializer, Serializer};
 
