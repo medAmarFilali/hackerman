@@ -31,6 +31,8 @@ export type Request =
   | { type: "recordingShortcut"; active: boolean }
   | { type: "appAction"; device: Fingerprint; app: string; action: AppAction }
   | { type: "setScreensAllowed"; device: Fingerprint; allowed: boolean }
+  /** A monitor plugged into more than one PC is showing this one now. */
+  | { type: "showOnMonitor"; hardware: string; device: Fingerprint }
   | { type: "shutdown" };
 
 export type MediaCommand = "playPause" | "back" | "forward";
@@ -180,6 +182,18 @@ export interface ScreenView {
   online: boolean;
   /** What's open on this screen, frontmost first. */
   apps: AppView[];
+  /**
+   * Set if this monitor is plugged into other PCs as well. Their copies of it aren't on the
+   * canvas: this is the one it's showing.
+   */
+  shared: SharedScreen | null;
+}
+
+export interface SharedScreen {
+  /** What the monitor says it is, for showOnMonitor. */
+  hardware: string;
+  /** Every PC it's plugged into, the one it's showing among them. */
+  devices: Fingerprint[];
 }
 
 export interface MediaState {

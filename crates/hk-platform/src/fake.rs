@@ -10,6 +10,7 @@ use hk_core::geometry::{Point, Rect};
 use hk_core::input::InputEvent;
 use hk_core::layout::Monitor;
 use hk_core::screens::ScreenImage;
+use hk_core::shared_monitors::MonitorIdentity;
 use hk_core::switcher::LocalEvent;
 
 use crate::{Capture, Error, FileSource, InputHandler, Platform};
@@ -20,6 +21,7 @@ const MAX_RECORDED: usize = 10_000;
 #[derive(Default)]
 struct State {
     monitors: Vec<Monitor>,
+    identities: Vec<MonitorIdentity>,
     injected: Vec<InputEvent>,
     cursor: Point,
     cursor_hidden: bool,
@@ -113,6 +115,11 @@ impl FakePlatform {
 
     pub fn set_monitors(&self, monitors: Vec<Monitor>) {
         self.state().monitors = monitors;
+    }
+
+    /// Says what some of its monitors are, as monitors with a serial number do.
+    pub fn set_monitor_identities(&self, identities: Vec<MonitorIdentity>) {
+        self.state().identities = identities;
     }
 
     /// Everything replayed on this machine so far.
@@ -260,6 +267,10 @@ impl FakePlatform {
 impl Platform for FakePlatform {
     fn monitors(&self) -> Vec<Monitor> {
         self.state().monitors.clone()
+    }
+
+    fn monitor_identities(&self) -> Vec<MonitorIdentity> {
+        self.state().identities.clone()
     }
 
     fn model(&self) -> Option<String> {

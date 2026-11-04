@@ -22,6 +22,7 @@ use hk_core::geometry::Point;
 use hk_core::input::InputEvent;
 use hk_core::layout::Monitor;
 use hk_core::screens::ScreenImage;
+use hk_core::shared_monitors::MonitorIdentity;
 use hk_core::switcher::LocalEvent;
 
 pub use imp::{NativePlatform, native};
@@ -41,6 +42,12 @@ pub type InputHandler = Box<dyn FnMut(LocalEvent) -> bool + Send>;
 pub trait Platform: Clone + Send + Sync + 'static {
     /// This machine's monitors right now.
     fn monitors(&self) -> Vec<Monitor>;
+
+    /// What those monitors say they are, for the ones that give a serial number. A monitor
+    /// plugged into another device too says the same there.
+    fn monitor_identities(&self) -> Vec<MonitorIdentity> {
+        Vec::new()
+    }
 
     /// The make and model of this computer, if it says, like "Dell Latitude 7420".
     fn model(&self) -> Option<String>;

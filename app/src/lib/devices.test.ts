@@ -6,6 +6,8 @@ import {
   deviceNumbers,
   headline,
   isLaptop,
+  nameOf,
+  sharedChoices,
 } from "./devices";
 import type { DeviceStatus, UiState } from "./types";
 
@@ -141,6 +143,7 @@ describe("isLaptop", () => {
     primary: true,
     online: true,
     apps: [],
+    shared: null,
   });
 
   it("goes by whether a PC has a built-in display", () => {
@@ -184,5 +187,27 @@ describe("headline", () => {
   it("points to pairing when there's nothing to cross to", () => {
     expect(headline(stateWith({ devices: [device("x", "available")] })).detail).toContain("Pair");
     expect(headline(stateWith({ devices: [device("b")] })).detail).toContain("violet band");
+  });
+});
+
+describe("sharedChoices", () => {
+  const MAESTRO = "PKB036E:D2NEE0014200";
+
+  it("lists the PCs a monitor plugged into several can show, this one first", () => {
+    const state = stateWith({ devices: [device("main"), device("dell")] });
+    expect(
+      sharedChoices(state, { shared: { hardware: MAESTRO, devices: ["dell", ME] } }),
+    ).toEqual([
+      { device: ME, name: "This PC" },
+      { device: "dell", name: "DELL" },
+    ]);
+  });
+
+  it("is empty for a monitor plugged into one PC", () => {
+    expect(sharedChoices(stateWith(), { shared: null })).toEqual([]);
+  });
+
+  it("copes with a PC it no longer knows", () => {
+    expect(nameOf(stateWith(), "gone")).toBe("Unknown");
   });
 });

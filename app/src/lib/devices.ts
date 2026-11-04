@@ -26,6 +26,28 @@ export function deviceNumbers(state: UiState): Map<Fingerprint, number> {
   return numbers;
 }
 
+/** The name a PC goes by on the canvas. */
+export function nameOf(state: UiState, device: Fingerprint): string {
+  return device === state.me.fingerprint
+    ? "This PC"
+    : (state.devices.find((d) => d.fingerprint === device)?.name ?? "Unknown");
+}
+
+/**
+ * The PCs a monitor plugged into several of them can be showing, this one first, then in the
+ * order they're numbered. Empty for any other monitor.
+ */
+export function sharedChoices(
+  state: UiState,
+  screen: Pick<ScreenView, "shared">,
+): { device: Fingerprint; name: string }[] {
+  const numbers = deviceNumbers(state);
+  const order = (device: Fingerprint) => numbers.get(device) ?? Number.MAX_SAFE_INTEGER;
+  return [...(screen.shared?.devices ?? [])]
+    .sort((a, b) => order(a) - order(b))
+    .map((device) => ({ device, name: nameOf(state, device) }));
+}
+
 /** The PC the keyboard and mouse are working on, unless sharing is off. */
 export function activeDevice(state: UiState): Fingerprint | null {
   if (!state.enabled) return null;

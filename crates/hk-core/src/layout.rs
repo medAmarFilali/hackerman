@@ -16,6 +16,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::device::Fingerprint;
 use crate::geometry::{Point, Rect};
+use crate::shared_monitors::SharedMonitor;
 
 /// A monitor still counts as being past an edge if it overlaps that edge by this
 /// little on the canvas, in logical pixels.
@@ -131,7 +132,19 @@ impl LayoutDoc {
         devices: &[DeviceMonitors],
         placements: Vec<Placement>,
     ) {
-        let mut arrangement: Vec<Placement> = Topology::build(devices, self)
+        self.apply_edit_sharing(author, devices, &[], placements);
+    }
+
+    /// The same, with some monitors plugged into more than one device. Their hidden copies
+    /// are saved where the one shown is, so that whichever is shown next is there too.
+    pub fn apply_edit_sharing(
+        &mut self,
+        author: Fingerprint,
+        devices: &[DeviceMonitors],
+        shared: &[SharedMonitor],
+        placements: Vec<Placement>,
+    ) {
+        let mut arrangement: Vec<Placement> = Topology::build_sharing(devices, self, shared)
             .screens
             .iter()
             .map(|screen| Placement {
@@ -144,6 +157,24 @@ impl LayoutDoc {
             .collect();
         for placement in placements {
             upsert(&mut arrangement, placement);
+        }
+        for monitor in shared {
+            let shown = arrangement
+                .iter()
+                .find(|p| p.key() == monitor.showing)
+                .cloned();
+            if let Some(shown) = shown {
+                for copy in &monitor.hidden {
+                    upsert(
+                        &mut arrangement,
+                        Placement {
+                            device: copy.device,
+                            monitor: copy.monitor.clone(),
+                            ..shown.clone()
+                        },
+                    );
+                }
+            }
         }
 
         self.counter += 1;
@@ -348,6 +379,9 @@ pub struct Screen {
     /// The width the user gave it on the canvas, if they resized it.
     pub custom_width: Option<f64>,
     pub online: bool,
+    /// It's a monitor plugged into another device as well, showing that one. It sits where
+    /// the copy that's shown is, and the cursor never goes onto it. See [`crate::shared_monitors`].
+    pub hidden: bool,
 }
 
 impl Screen {
@@ -403,6 +437,20 @@ impl Topology {
     /// screen larger, and a new one can appear where another device's screen is. Nothing
     /// saved changes, so a screen going back to its old size goes back to its old place.
     pub fn build(devices: &[DeviceMonitors], layout: &LayoutDoc) -> Self {
+        Self::build_sharing(devices, layout, &[])
+    }
+
+    /// The same, with some monitors plugged into more than one device. Their hidden copies
+    /// play no part in arranging the rest: each goes where the copy that's shown ends up.
+    pub fn build_sharing(
+        devices: &[DeviceMonitors],
+        layout: &LayoutDoc,
+        shared: &[SharedMonitor],
+    ) -> Self {
+        let hidden: HashMap<&MonitorKey, &MonitorKey> = shared
+            .iter()
+            .flat_map(|monitor| monitor.hidden.iter().map(|copy| (copy, &monitor.showing)))
+            .collect();
         let saved = layout.placements_for(&monitor_set(devices));
         let mut devices: Vec<&DeviceMonitors> = devices.iter().collect();
         devices.sort_by_key(|device| device.device);
@@ -417,7 +465,12 @@ impl Topology {
             let mut without_a_place = Vec::new();
             for ((monitor, &arranged), place) in device.monitors.iter().zip(&arranged).zip(places) {
                 let index = screens.len();
+                let is_hidden = hidden.contains_key(&MonitorKey {
+                    device: device.device,
+                    monitor: monitor.id.clone(),
+                });
                 match place {
+                    _ if is_hidden => {}
                     Some(_) => {
                         with_a_place.push(index);
                         anchor.get_or_insert((index, arranged));
@@ -439,6 +492,7 @@ impl Topology {
                     canvas: Rect::new(x, y, width, height),
                     custom_width,
                     online: device.online,
+                    hidden: is_hidden,
                 });
             }
             per_device.push((anchor, without_a_place));
@@ -498,6 +552,30 @@ impl Topology {
                 taken.push(canvas);
             }
         }
+
+        for index in 0..screens.len() {
+            if !screens[index].hidden {
+                continue;
+            }
+            let copy = MonitorKey {
+                device: screens[index].device,
+                monitor: screens[index].monitor.id.clone(),
+            };
+            let shown = hidden.get(&copy).and_then(|shown| {
+                screens
+                    .iter()
+                    .find(|s| s.device == shown.device && s.monitor.id == shown.monitor)
+            });
+            if let Some(&Screen {
+                canvas,
+                custom_width,
+                ..
+            }) = shown
+            {
+                screens[index].canvas = canvas;
+                screens[index].custom_width = custom_width;
+            }
+        }
         Self { screens }
     }
 
@@ -528,7 +606,8 @@ impl Topology {
     /// Screens don't have to touch, however far apart they are. That screen can
     /// be on another device, or be another monitor of the same one, since the
     /// canvas decides the order of the screens whatever the device's own display
-    /// settings say. Devices that are offline are looked straight through.
+    /// settings say. Devices that are offline, and hidden screens, are looked straight
+    /// through.
     pub fn crossing(&self, from: &Screen, side: Side, pixel: Point) -> Option<Crossing> {
         let at = from.to_canvas(clamp_to_pixels(pixel, from.monitor.bounds));
         let edge = from.canvas;
@@ -536,7 +615,7 @@ impl Topology {
 
         let mut nearest: Option<(f64, Crossing)> = None;
         for (index, screen) in self.screens.iter().enumerate() {
-            if !screen.online || screen.is_same_monitor(from) {
+            if !screen.online || screen.hidden || screen.is_same_monitor(from) {
                 continue;
             }
             let target = screen.canvas;
@@ -1252,6 +1331,116 @@ mod tests {
             .find(|screen| screen.device == device && screen.monitor.id == id)
             .unwrap()
             .canvas
+    }
+
+    /// A and B each have a laptop screen and the same monitor, which is showing B.
+    fn one_monitor_on_a_and_b() -> ([DeviceMonitors; 2], [SharedMonitor; 1]) {
+        let devices = [
+            device(
+                A,
+                vec![
+                    monitor("a-laptop", 0.0, 0.0, 1920.0, 1200.0, 1.0),
+                    monitor("a-maestro", 1920.0, 0.0, 1920.0, 1080.0, 1.0),
+                ],
+            ),
+            device(
+                B,
+                vec![
+                    monitor("b-laptop", 0.0, 0.0, 1920.0, 1200.0, 1.0),
+                    monitor("b-maestro", 1920.0, 0.0, 1920.0, 1080.0, 1.0),
+                ],
+            ),
+        ];
+        let shared = [SharedMonitor {
+            hardware: "PKB036E:D2NEE0014200".into(),
+            showing: MonitorKey {
+                device: B,
+                monitor: "b-maestro".into(),
+            },
+            hidden: vec![MonitorKey {
+                device: A,
+                monitor: "a-maestro".into(),
+            }],
+        }];
+        (devices, shared)
+    }
+
+    #[test]
+    fn a_hidden_copy_sits_under_the_one_shown_and_pushes_nothing_aside() {
+        let (devices, shared) = one_monitor_on_a_and_b();
+        let mut layout = LayoutDoc::default();
+        layout.apply_edit_sharing(
+            A,
+            &devices,
+            &shared,
+            vec![
+                placement(A, "a-laptop", 0.0, 0.0),
+                placement(A, "a-maestro", 1920.0, 0.0),
+                placement(B, "b-laptop", 0.0, 1200.0),
+                placement(B, "b-maestro", 1920.0, 0.0),
+            ],
+        );
+        let topology = Topology::build_sharing(&devices, &layout, &shared);
+        let shown = canvas_of(&topology, B, "b-maestro");
+        assert_eq!(
+            shown,
+            Rect::new(1920.0, 0.0, 1920.0, 1080.0),
+            "not pushed aside"
+        );
+        assert_eq!(canvas_of(&topology, A, "a-maestro"), shown);
+        let hidden = topology
+            .screens
+            .iter()
+            .filter(|screen| screen.hidden)
+            .map(|screen| (screen.device, screen.monitor.id.as_str()))
+            .collect::<Vec<_>>();
+        assert_eq!(hidden, [(A, "a-maestro")]);
+    }
+
+    #[test]
+    fn a_hidden_copy_is_saved_where_the_shown_one_is() {
+        let (devices, shared) = one_monitor_on_a_and_b();
+        let mut layout = LayoutDoc::default();
+        layout.apply_edit_sharing(
+            A,
+            &devices,
+            &shared,
+            vec![placement(B, "b-maestro", 4000.0, 0.0)],
+        );
+        // Shown on A instead: it's where B's was, with nothing else to say where it goes.
+        let swapped = [SharedMonitor {
+            showing: shared[0].hidden[0].clone(),
+            hidden: vec![shared[0].showing.clone()],
+            ..shared[0].clone()
+        }];
+        let topology = Topology::build_sharing(&devices, &layout, &swapped);
+        assert_eq!(canvas_of(&topology, A, "a-maestro").x, 4000.0);
+    }
+
+    #[test]
+    fn nothing_crosses_onto_a_hidden_copy() {
+        let (devices, shared) = one_monitor_on_a_and_b();
+        let mut layout = LayoutDoc::default();
+        layout.apply_edit_sharing(
+            A,
+            &devices,
+            &shared,
+            vec![
+                placement(A, "a-laptop", 0.0, 0.0),
+                placement(B, "b-laptop", 0.0, 1200.0),
+                placement(B, "b-maestro", 1920.0, 0.0),
+            ],
+        );
+        let topology = Topology::build_sharing(&devices, &layout, &shared);
+        let laptop = topology.device_screens(A).next().unwrap().clone();
+        let crossing = topology
+            .crossing(&laptop, Side::Right, Point::new(1919.0, 500.0))
+            .unwrap();
+        assert_eq!(crossing.device, B, "the monitor is showing B");
+        assert_eq!(
+            topology.screens[crossing.screen].monitor.id, "b-maestro",
+            "and that's where it goes"
+        );
     }
 
     #[test]

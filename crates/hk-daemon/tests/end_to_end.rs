@@ -17,6 +17,7 @@ use hk_core::input::{InputEvent, KeyCode};
 use hk_core::layout::{LayoutDoc, Monitor, Placement};
 use hk_core::rules::{CrossModifier, NameClash, ReceiveFiles, Rules, Shortcut};
 use hk_core::screens::{MAX_PICTURE_BYTES, ScreenImage};
+use hk_core::shared_monitors::MonitorIdentity;
 use hk_core::switcher::LocalEvent;
 use hk_daemon::{Options, lock_screen, run};
 use hk_ipc::{
@@ -1302,6 +1303,95 @@ async fn the_cursor_travels_across_a_desk_with_a_computer_split_around_two_other
             s.control == ControlView::Controlling { device: m_id }
         })
         .await;
+}
+
+/// The real desk again: the Maestro is plugged into both laptops at once.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_monitor_plugged_into_two_computers_is_one_screen_showing_the_one_chosen() {
+    const MAESTRO: &str = "PKB036E:D2NEE0014200";
+    let laptop_and_maestro = |width: f64, height: f64, scale: f64| {
+        let platform = FakePlatform::new(vec![
+            monitor("laptop", 0.0, 0.0, width, height, scale),
+            monitor("maestro", width, 0.0, 1920.0, 1080.0, 1.0),
+        ]);
+        platform.set_monitor_identities(vec![MonitorIdentity {
+            monitor: "maestro".into(),
+            hardware: MAESTRO.into(),
+        }]);
+        platform
+    };
+    let mut x1 = Device::start_with("x1", laptop_and_maestro(1920.0, 1200.0, 1.0)).await;
+    let mut dell = Device::start_with("dell", laptop_and_maestro(2560.0, 1600.0, 1.0)).await;
+    let (x1_id, dell_id) = (x1.fingerprint(), dell.fingerprint());
+    pair(&mut x1, &mut dell).await;
+
+    let maestros = |s: &UiState| {
+        s.screens
+            .iter()
+            .filter(|screen| screen.monitor == "maestro")
+            .cloned()
+            .collect::<Vec<_>>()
+    };
+    let shown_as = |s: &UiState, device: Fingerprint| {
+        let maestros = maestros(s);
+        maestros.len() == 1
+            && maestros[0].device == device
+            && maestros[0]
+                .shared
+                .as_ref()
+                .is_some_and(|shared| shared.hardware == MAESTRO && shared.devices.len() == 2)
+    };
+    x1.wait_for("one Maestro on the canvas", |s| {
+        maestros(s).len() == 1 && maestros(s)[0].shared.is_some()
+    })
+    .await;
+
+    // Shown as the X1's, to the right of its laptop, with the Dell's laptop below.
+    x1.request(Request::ShowOnMonitor {
+        hardware: MAESTRO.into(),
+        device: x1_id,
+    })
+    .await;
+    x1.wait_for("showing the X1", |s| shown_as(s, x1_id)).await;
+    x1.request(Request::SetPlacements {
+        placements: vec![
+            placed(x1_id, "laptop", 0.0, 0.0),
+            placed(x1_id, "maestro", 1920.0, 0.0),
+            placed(dell_id, "laptop", 0.0, 1200.0),
+        ],
+    })
+    .await;
+    let arranged = |s: &UiState, device: Fingerprint| {
+        shown_as(s, device) && maestros(s)[0].x == 1920.0 && maestros(s)[0].y == 0.0
+    };
+    x1.wait_for("arranged", |s| arranged(s, x1_id)).await;
+    dell.wait_for("the same on the Dell", |s| arranged(s, x1_id))
+        .await;
+
+    // The X1's cursor goes onto its own copy, as it would without Hackerman.
+    x1.platform.warp_for_test(Point::new(1919.0, 500.0));
+    assert!(!x1.move_mouse(1921.0, 500.0), "left to Windows");
+    x1.platform.warp_for_test(Point::new(500.0, 500.0));
+
+    // The user switches the monitor to the Dell, and says so on the Dell. It stays where it was.
+    dell.request(Request::ShowOnMonitor {
+        hardware: MAESTRO.into(),
+        device: dell_id,
+    })
+    .await;
+    dell.wait_for("showing the Dell", |s| arranged(s, dell_id))
+        .await;
+    x1.wait_for("the X1 hears of it", |s| arranged(s, dell_id))
+        .await;
+
+    // Going right from the X1's laptop now goes to the Dell, onto its copy of the Maestro.
+    x1.platform.warp_for_test(Point::new(1919.0, 500.0));
+    assert!(x1.move_mouse(1921.0, 500.0), "hidden from Windows");
+    x1.wait_for("controlling the Dell", |s| {
+        s.control == ControlView::Controlling { device: dell_id }
+    })
+    .await;
+    wait_for_position_near(&dell, 2560.0, 500.0).await;
 }
 
 /// If a computer in the middle goes away, the far screen must still be reachable.

@@ -128,6 +128,24 @@ The number on each screen is the computer's shortcut: **Ctrl+Alt** and that numb
 jumps there. The keyboards drawn under laptops and the stands drawn under monitors can
 be turned off in **Settings**.
 
+### One monitor plugged into two computers
+
+A monitor plugged into two or more of your computers at once is one screen on the canvas, as the
+computer it's showing. Its corner says which, like **Showing This PC**. After switching the
+monitor with its own input button, choose the computer it's showing there, on any of your
+computers. Nothing on the canvas moves: the monitor stays where it was, as the other computer's.
+
+- Moving onto it goes to the computer it's showing, whichever computer the cursor comes from.
+  The cursor never goes onto a copy that isn't being shown, where it couldn't be seen, even when
+  Windows' own arrangement would take it there.
+- While the computer it was showing is off or away, it's shown as one that's there, since most
+  monitors switch to a picture that's there by themselves.
+- A monitor is only taken to be the same one if it gives the same serial number on every
+  computer. Two monitors of one model stay apart, and so does one with no serial number.
+- Hackerman can't switch the monitor's input itself yet. That takes the monitor accepting
+  commands over its cable, which many don't.
+- All the computers it's plugged into need this version.
+
 ### Turning it off
 
 **Disable**, at the top of the window or in the tray menu, stops everything on that

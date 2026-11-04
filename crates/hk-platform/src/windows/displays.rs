@@ -9,6 +9,7 @@ use std::collections::HashMap;
 
 use hk_core::geometry::Rect;
 use hk_core::layout::Monitor;
+use hk_core::shared_monitors::MonitorIdentity;
 use windows::Win32::Devices::Display::{
     DISPLAYCONFIG_DEVICE_INFO_GET_SOURCE_NAME, DISPLAYCONFIG_DEVICE_INFO_GET_TARGET_NAME,
     DISPLAYCONFIG_DEVICE_INFO_HEADER, DISPLAYCONFIG_MODE_INFO,
@@ -22,9 +23,10 @@ use windows::Win32::Foundation::{ERROR_SUCCESS, LPARAM, RECT};
 use windows::Win32::Graphics::Gdi::{
     EnumDisplayMonitors, GetMonitorInfoW, HDC, HMONITOR, MONITORINFO, MONITORINFOEXW,
 };
+use windows::Win32::System::Registry::{HKEY_LOCAL_MACHINE, RRF_RT_REG_BINARY, RegGetValueW};
 use windows::Win32::UI::HiDpi::{GetDpiForMonitor, MDT_EFFECTIVE_DPI};
 use windows::Win32::UI::WindowsAndMessaging::MONITORINFOF_PRIMARY;
-use windows::core::BOOL;
+use windows::core::{BOOL, HSTRING, w};
 
 /// Windows' 100% scale.
 const BASE_DPI: f64 = 96.0;
@@ -109,6 +111,92 @@ fn describe(handle: HMONITOR, names: &HashMap<String, DisplayName>) -> Option<Mo
         scale,
         primary: info.monitorInfo.dwFlags & MONITORINFOF_PRIMARY != 0,
     })
+}
+
+/// What each monitor says it is, for the ones that give a serial number.
+pub(super) fn identities() -> Vec<MonitorIdentity> {
+    enumerate()
+        .into_iter()
+        .filter_map(|monitor| {
+            let hardware = identity_from_edid(&edid(&monitor.id)?)?;
+            Some(MonitorIdentity {
+                monitor: monitor.id,
+                hardware,
+            })
+        })
+        .collect()
+}
+
+/// The description a monitor gives of itself, which Windows keeps. A monitor's ID looks like
+/// `\\?\DISPLAY#PKB036E#4&b73cac7&0&UID4145#{e6f07b5f-…}`, and it's kept under the middle two.
+fn edid(monitor_id: &str) -> Option<Vec<u8>> {
+    let mut parts = monitor_id.split('#');
+    parts.next()?;
+    let (model, instance) = (parts.next()?, parts.next()?);
+    let plain = |part: &str| !part.is_empty() && !part.contains(['\\', '/']);
+    if !plain(model) || !plain(instance) {
+        return None;
+    }
+    let key = HSTRING::from(format!(
+        r"SYSTEM\CurrentControlSet\Enum\DISPLAY\{model}\{instance}\Device Parameters"
+    ));
+    let mut edid = vec![0u8; 1024];
+    let mut size = edid.len() as u32;
+    // SAFETY: the size given is that of the buffer, which Windows says how much of it filled.
+    let result = unsafe {
+        RegGetValueW(
+            HKEY_LOCAL_MACHINE,
+            &key,
+            w!("EDID"),
+            RRF_RT_REG_BINARY,
+            None,
+            Some(edid.as_mut_ptr().cast()),
+            Some(&raw mut size),
+        )
+    };
+    if result != ERROR_SUCCESS {
+        return None;
+    }
+    edid.truncate(size as usize);
+    Some(edid)
+}
+
+/// A monitor's maker, model and serial number, like `PKB036E:D2NEE0014200`, from its EDID.
+/// One without a serial number has none: two of that model would look like one monitor.
+fn identity_from_edid(edid: &[u8]) -> Option<String> {
+    const HEADER: [u8; 8] = [0x00, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0x00];
+    if edid.len() < 128 || edid[..8] != HEADER {
+        return None;
+    }
+    // Three letters, five bits each, with 1 for A.
+    let maker = u16::from_be_bytes([edid[8], edid[9]]);
+    let maker: String = [10, 5, 0]
+        .into_iter()
+        .map(|shift| match (maker >> shift) & 0x1F {
+            letter @ 1..=26 => Some(char::from(b'A' + letter as u8 - 1)),
+            _ => None,
+        })
+        .collect::<Option<_>>()?;
+    let product = u16::from_le_bytes([edid[10], edid[11]]);
+
+    // Written out in one of the four descriptors, or else as a number.
+    let written = (0..4)
+        .map(|index| &edid[54 + 18 * index..72 + 18 * index])
+        .find(|descriptor| descriptor[..3] == [0, 0, 0] && descriptor[3] == 0xFF)
+        .map(|descriptor| {
+            descriptor[5..]
+                .iter()
+                .take_while(|&&byte| byte != b'\n')
+                .filter(|byte| byte.is_ascii_graphic())
+                .map(|&byte| char::from(byte))
+                .collect::<String>()
+        })
+        .filter(|serial| !serial.is_empty() && serial.chars().any(|c| c != '0'));
+    let number = u32::from_le_bytes([edid[12], edid[13], edid[14], edid[15]]);
+    // Some models all give the same made-up one.
+    let numbered = (number != 0 && number != 0x0101_0101).then(|| number.to_string());
+    let serial = written.or(numbered)?;
+    Some(format!("{maker}{product:04X}:{serial}"))
 }
 
 fn fallback_name(gdi_name: &str) -> String {
@@ -220,6 +308,71 @@ mod tests {
     #[test]
     fn fallback_names_use_the_display_number() {
         assert_eq!(fallback_name(r"\\.\DISPLAY2"), "Display 2");
+    }
+
+    /// Like the Maestro236D's: made by Packard Bell, with its serial written out.
+    fn edid(serial_text: Option<&str>, serial_number: u32) -> Vec<u8> {
+        let mut edid = vec![0u8; 128];
+        edid[..8].copy_from_slice(&[0x00, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0x00]);
+        edid[8..10].copy_from_slice(&[0x41, 0x62]);
+        edid[10..12].copy_from_slice(&0x036E_u16.to_le_bytes());
+        edid[12..16].copy_from_slice(&serial_number.to_le_bytes());
+        // The monitor's name, in the last descriptor.
+        edid[108 + 3] = 0xFC;
+        edid[108 + 5..108 + 17].copy_from_slice(b"Maestro236D\n");
+        if let Some(text) = serial_text {
+            edid[90 + 3] = 0xFF;
+            let mut field = [b' '; 13];
+            field[..text.len()].copy_from_slice(text.as_bytes());
+            field[text.len()] = b'\n';
+            edid[90 + 5..90 + 18].copy_from_slice(&field);
+        }
+        edid
+    }
+
+    #[test]
+    fn a_monitor_is_its_maker_model_and_serial_number() {
+        assert_eq!(
+            identity_from_edid(&edid(Some("D2NEE0014200"), 1_134_011_102)).as_deref(),
+            Some("PKB036E:D2NEE0014200")
+        );
+        assert_eq!(
+            identity_from_edid(&edid(None, 1_134_011_102)).as_deref(),
+            Some("PKB036E:1134011102"),
+            "with only the number"
+        );
+    }
+
+    /// Two monitors of one model would look like the same one.
+    #[test]
+    fn a_monitor_with_no_real_serial_number_has_no_identity() {
+        assert_eq!(identity_from_edid(&edid(None, 0)), None);
+        assert_eq!(identity_from_edid(&edid(None, 0x0101_0101)), None);
+        assert_eq!(identity_from_edid(&edid(Some("0000000"), 0)), None);
+    }
+
+    #[test]
+    fn what_isnt_an_edid_says_nothing() {
+        assert_eq!(identity_from_edid(&[]), None);
+        assert_eq!(identity_from_edid(&[0xFF; 128]), None);
+        let mut short = edid(Some("D2NEE0014200"), 1);
+        short.truncate(100);
+        assert_eq!(identity_from_edid(&short), None);
+    }
+
+    /// Only reads. Run with `--nocapture` to see what it finds.
+    #[test]
+    fn this_machines_monitors_say_what_they_are() {
+        let monitors = enumerate();
+        for identity in identities() {
+            println!("{} is {}", identity.monitor, identity.hardware);
+            assert!(
+                monitors
+                    .iter()
+                    .any(|monitor| monitor.id == identity.monitor)
+            );
+            assert!(identity.hardware.contains(':'), "{}", identity.hardware);
+        }
     }
 
     #[test]

@@ -105,6 +105,12 @@ pub enum Request {
         device: Fingerprint,
         allowed: bool,
     },
+    /// A monitor plugged into more than one device is showing this one now, which the user
+    /// knows and Hackerman can't. See [`SharedScreen`].
+    ShowOnMonitor {
+        hardware: String,
+        device: Fingerprint,
+    },
     /// Asks for a picture of a screen on a device, which may be this one. The answer comes
     /// back with this `id`, as a [`ScreenPicture`].
     ScreenPicture {
@@ -321,6 +327,19 @@ pub struct ScreenView {
     pub online: bool,
     /// What's open on this screen, frontmost first.
     pub apps: Vec<AppView>,
+    /// Set if this monitor is plugged into other devices as well. Its copies on those aren't
+    /// on the canvas: this is the one it's showing.
+    pub shared: Option<SharedScreen>,
+}
+
+/// A monitor plugged into more than one device.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SharedScreen {
+    /// What it says it is, for [`Request::ShowOnMonitor`].
+    pub hardware: String,
+    /// Every device it's plugged into, the one it's showing among them.
+    pub devices: Vec<Fingerprint>,
 }
 
 /// An app on a screen on the canvas.

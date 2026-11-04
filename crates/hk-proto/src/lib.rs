@@ -6,6 +6,7 @@ use hk_core::apps::{AppAction, MediaCommand, RunningApp};
 use hk_core::clipboard::{ClipVersion, ClipboardData, SharedFile};
 use hk_core::input::InputEvent;
 use hk_core::layout::{LayoutDoc, Monitor};
+use hk_core::shared_monitors::{MonitorIdentity, Showing};
 use serde::{Deserialize, Serialize};
 
 /// Peers exchange this in [`Message::Hello`] and refuse any other number, so the
@@ -42,13 +43,17 @@ pub const FEATURE_SCREENS: u32 = 1 << 4;
 /// Can be asked to bring apps to the front, and move them between its screens.
 pub const FEATURE_APP_ACTIONS: u32 = 1 << 5;
 
+/// Knows when a monitor is plugged into more than one device, and which one it's showing.
+pub const FEATURE_SHARED_MONITORS: u32 = 1 << 6;
+
 /// Everything this version can do beyond the base protocol, for [`Message::Hello`].
 pub const FEATURES: u32 = FEATURE_FILES
     | FEATURE_SEND_FILES
     | FEATURE_APPS
     | FEATURE_MEDIA
     | FEATURE_SCREENS
-    | FEATURE_APP_ACTIONS;
+    | FEATURE_APP_ACTIONS
+    | FEATURE_SHARED_MONITORS;
 
 /// A message sent from one peer to another.
 ///
@@ -105,6 +110,13 @@ pub enum Message {
     Media { app: String, command: MediaCommand },
     /// Asks the receiver to do this with an app's windows. Needs [`FEATURE_APP_ACTIONS`].
     AppAction { app: String, action: AppAction },
+    /// What the sender's monitors say they are, for the ones that give a serial number, so
+    /// that one plugged into several devices is seen to be one monitor. Sent after `Hello`
+    /// and with every [`Message::Monitors`]. Needs [`FEATURE_SHARED_MONITORS`].
+    MonitorIdentities(Vec<MonitorIdentity>),
+    /// Which device each of those monitors is showing, as far as the sender knows. Needs
+    /// [`FEATURE_SHARED_MONITORS`].
+    Showing(Showing),
 }
 
 /// See [`Message::Transfer`].
@@ -434,6 +446,25 @@ mod tests {
             };
             assert_eq!(decode(&encode(&message).unwrap()).unwrap(), message);
         }
+    }
+
+    #[test]
+    fn monitors_on_several_devices_round_trip() {
+        let identities = Message::MonitorIdentities(vec![MonitorIdentity {
+            monitor: "\\\\?\\DISPLAY#PKB036E#4&b73cac7&0&UID4145".into(),
+            hardware: "PKB036E:D2NEE0014200".into(),
+        }]);
+        assert_eq!(decode(&encode(&identities).unwrap()).unwrap(), identities);
+
+        let mut showing = Showing::default();
+        showing.choose(
+            "PKB036E:D2NEE0014200",
+            hk_core::device::Fingerprint::from_bytes([2; 32]),
+            1_762_272_000_000,
+            hk_core::device::Fingerprint::from_bytes([1; 32]),
+        );
+        let message = Message::Showing(showing);
+        assert_eq!(decode(&encode(&message).unwrap()).unwrap(), message);
     }
 
     #[test]

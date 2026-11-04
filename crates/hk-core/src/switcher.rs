@@ -211,18 +211,47 @@ impl Switcher {
     pub fn set_environment(&mut self, topology: Topology, park: Point) -> Vec<Action> {
         self.topology = topology;
         self.park = park;
+        // A monitor plugged into another device as well may have just switched to that one,
+        // and the cursor mustn't be left where nobody can see it.
+        let on_hidden = |device, at| {
+            self.topology
+                .screen_at(device, at)
+                .is_some_and(|screen| screen.hidden)
+        };
         let Some(remote) = self.remote else {
+            if on_hidden(self.me, self.last_position)
+                && let Some(middle) = self.middle_of_main_screen(self.me)
+            {
+                self.last_position = middle;
+                return vec![Action::RestoreCursor(middle)];
+            }
             return vec![];
         };
-        let online = self
-            .topology
-            .device_screens(remote.device)
-            .any(|screen| screen.online);
-        if online {
-            vec![]
-        } else {
-            self.return_home_to(self.left_from)
+        match self.middle_of_main_screen(remote.device) {
+            None => self.return_home_to(self.left_from),
+            Some(middle) if on_hidden(remote.device, remote.cursor) => {
+                self.place_remote_cursor(remote, middle)
+            }
+            Some(_) => vec![],
         }
+    }
+
+    /// The middle of the main monitor of a device that can be reached, or of another of its
+    /// monitors if that one can't.
+    fn middle_of_main_screen(&self, device: Fingerprint) -> Option<Point> {
+        let screens = || {
+            self.topology
+                .device_screens(device)
+                .filter(|s| s.online && !s.hidden)
+        };
+        let screen = screens()
+            .find(|screen| screen.monitor.primary)
+            .or_else(|| screens().next())?;
+        let b = screen.monitor.bounds;
+        Some(Point::new(
+            b.x + (b.width / 2.0).floor(),
+            b.y + (b.height / 2.0).floor(),
+        ))
     }
 
     /// Another device started controlling this one, so this one must let go.
@@ -334,18 +363,9 @@ impl Switcher {
         if self.controlling() == Some(device) {
             return vec![];
         }
-        let screens = || self.topology.device_screens(device).filter(|s| s.online);
-        let Some(screen) = screens()
-            .find(|screen| screen.monitor.primary)
-            .or_else(|| screens().next())
-        else {
+        let Some(cursor) = self.middle_of_main_screen(device) else {
             return vec![];
         };
-        let b = screen.monitor.bounds;
-        let cursor = Point::new(
-            b.x + (b.width / 2.0).floor(),
-            b.y + (b.height / 2.0).floor(),
-        );
 
         let mut actions = Vec::with_capacity(3);
         match self.remote {
@@ -440,11 +460,21 @@ impl Switcher {
         };
         let bounds = screen.monitor.bounds;
         // The operating system is about to carry the cursor to another monitor here.
-        let entering = self
+        let entering_screen = self
             .topology
             .screen_at(self.me, to)
-            .filter(|target| target.monitor.id != screen.monitor.id)
-            .map(|target| target.monitor.id.clone());
+            .filter(|target| target.monitor.id != screen.monitor.id);
+        // That one is showing another device, so this one's cursor would be lost on it. It's
+        // where the copy that's shown is, so what's past the edge is that other device.
+        let into_hidden = entering_screen.is_some_and(|target| target.hidden);
+        let entering = entering_screen.map(|target| target.monitor.id.clone());
+        let stay = || {
+            if into_hidden {
+                Outcome::swallow(vec![])
+            } else {
+                Outcome::pass()
+            }
+        };
 
         let exit = Side::ALL
             .into_iter()
@@ -467,7 +497,7 @@ impl Switcher {
             });
         let Some((side, crossing)) = exit else {
             self.edge_contact = None;
-            return Outcome::pass();
+            return stay();
         };
 
         if crossing.device == self.me {
@@ -489,7 +519,7 @@ impl Switcher {
             || self.held_by_fullscreen()
             || !self.crossing_allowed(side, to, bounds)
         {
-            return Outcome::pass();
+            return stay();
         }
         if !self.pushed_long_enough(side) {
             // Held at the edge, rather than slipping onto the next local monitor.
@@ -596,8 +626,12 @@ impl Switcher {
                 let crossing = self.topology.crossing(&screen, side, moved)?;
                 Some((side, crossing))
             });
-        // The monitor the device's own arrangement would put the cursor on, if any.
-        let entering = self.topology.screen_at(device, moved);
+        // The monitor the device's own arrangement would put the cursor on, if any. One showing
+        // another device doesn't count: the cursor would be lost on it.
+        let entering = self
+            .topology
+            .screen_at(device, moved)
+            .filter(|screen| !screen.hidden);
 
         if let Some((side, crossing)) = exit {
             if crossing.device == device {
@@ -764,7 +798,8 @@ fn inset_entry(entry: Point, side: Side) -> Point {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::layout::{DeviceMonitors, LayoutDoc, Monitor, Placement};
+    use crate::layout::{DeviceMonitors, LayoutDoc, Monitor, MonitorKey, Placement};
+    use crate::shared_monitors::SharedMonitor;
 
     const ME: Fingerprint = Fingerprint::from_bytes([1; 32]);
     const PEER: Fingerprint = Fingerprint::from_bytes([2; 32]);
@@ -1056,6 +1091,202 @@ mod tests {
             [Action::StateChanged]
         );
         assert!(s.locked());
+    }
+
+    /// This laptop and the peer's each have one monitor to the right in their own display
+    /// settings, and it's the same monitor, plugged into both and showing `showing`. On the
+    /// canvas, it's to the right of this laptop, and the peer's laptop is below this one.
+    fn one_monitor_on_both(showing: Fingerprint) -> (Switcher, Vec<DeviceMonitors>, LayoutDoc) {
+        let devices = vec![
+            device(
+                ME,
+                vec![
+                    monitor("me-laptop", 0.0, 0.0, 1920.0, 1080.0),
+                    monitor("me-maestro", 1920.0, 0.0, 1920.0, 1080.0),
+                ],
+            ),
+            device(
+                PEER,
+                vec![
+                    monitor("peer-laptop", 0.0, 0.0, 1920.0, 1080.0),
+                    monitor("peer-maestro", 1920.0, 0.0, 1920.0, 1080.0),
+                ],
+            ),
+        ];
+        let shared = shared_on_both(showing);
+        let mut layout = LayoutDoc::default();
+        layout.apply_edit_sharing(
+            ME,
+            &devices,
+            &shared,
+            vec![
+                place(ME, "me-laptop", 0.0, 0.0),
+                place(ME, "me-maestro", 1920.0, 0.0),
+                place(PEER, "peer-laptop", 0.0, 1080.0),
+                place(PEER, "peer-maestro", 1920.0, 0.0),
+            ],
+        );
+        let mut switcher = Switcher::new(ME, PARK);
+        switcher.set_environment(Topology::build_sharing(&devices, &layout, &shared), PARK);
+        (switcher, devices, layout)
+    }
+
+    fn shared_on_both(showing: Fingerprint) -> Vec<SharedMonitor> {
+        let copy = |device| MonitorKey {
+            device,
+            monitor: if device == ME {
+                "me-maestro"
+            } else {
+                "peer-maestro"
+            }
+            .into(),
+        };
+        let other = if showing == ME { PEER } else { ME };
+        vec![SharedMonitor {
+            hardware: "PKB036E:D2NEE0014200".into(),
+            showing: copy(showing),
+            hidden: vec![copy(other)],
+        }]
+    }
+
+    #[test]
+    fn a_monitor_showing_this_computer_works_as_its_own() {
+        let (mut s, ..) = one_monitor_on_both(ME);
+        assert_eq!(
+            s.local(moving(1919.0, 500.0, 1921.0, 500.0)),
+            Outcome::pass()
+        );
+        assert_eq!(s.controlling(), None);
+    }
+
+    /// Windows would carry the cursor onto it, where it couldn't be seen. What's there is the
+    /// other computer's picture, so that's where it goes.
+    #[test]
+    fn a_monitor_showing_the_other_computer_leads_to_that_one() {
+        let (mut s, ..) = one_monitor_on_both(PEER);
+        assert_eq!(
+            s.local(moving(1919.0, 500.0, 1921.0, 500.0)),
+            Outcome::swallow(vec![
+                Action::Enter(PEER),
+                Action::ParkCursor(PARK),
+                at(PEER, 1920.0, 500.0),
+            ])
+        );
+    }
+
+    #[test]
+    fn the_way_onto_a_hidden_copy_is_a_wall_when_nothing_else_is_there() {
+        let (mut s, devices, mut layout) = one_monitor_on_both(PEER);
+        // Nothing is to the right of this laptop on the canvas now.
+        layout.apply_edit_sharing(
+            ME,
+            &devices,
+            &shared_on_both(PEER),
+            vec![place(PEER, "peer-maestro", 0.0, 5000.0)],
+        );
+        s.set_environment(
+            Topology::build_sharing(&devices, &layout, &shared_on_both(PEER)),
+            PARK,
+        );
+        assert_eq!(
+            s.local(moving(1919.0, 500.0, 1921.0, 500.0)),
+            Outcome::swallow(vec![]),
+            "held at the edge, rather than lost on the monitor"
+        );
+        assert_eq!(s.controlling(), None);
+    }
+
+    #[test]
+    fn a_cursor_left_on_a_monitor_that_switches_away_comes_back_into_view() {
+        let (mut s, devices, layout) = one_monitor_on_both(ME);
+        s.local(moving(2500.0, 500.0, 2501.0, 500.0));
+        let actions = s.set_environment(
+            Topology::build_sharing(&devices, &layout, &shared_on_both(PEER)),
+            PARK,
+        );
+        assert_eq!(actions, [Action::RestoreCursor(Point::new(960.0, 540.0))]);
+    }
+
+    #[test]
+    fn the_other_computers_cursor_never_goes_onto_its_hidden_copy() {
+        let (mut s, devices, mut layout) = one_monitor_on_both(ME);
+        // Nothing of this computer is to the right of the peer's laptop on the canvas.
+        layout.apply_edit_sharing(
+            ME,
+            &devices,
+            &shared_on_both(ME),
+            vec![place(PEER, "peer-laptop", 0.0, 3000.0)],
+        );
+        s.set_environment(
+            Topology::build_sharing(&devices, &layout, &shared_on_both(ME)),
+            PARK,
+        );
+        assert!(!s.jump_to(PEER).is_empty());
+        let actions = s.local(nudge(2000.0, 0.0));
+        assert_eq!(
+            actions.actions,
+            [at(PEER, 1919.0, 540.0)],
+            "stops at the edge"
+        );
+    }
+
+    #[test]
+    fn jumping_goes_to_a_screen_that_can_be_seen() {
+        let devices = vec![
+            device(ME, vec![monitor("me-laptop", 0.0, 0.0, 1920.0, 1080.0)]),
+            device(
+                PEER,
+                vec![
+                    monitor("peer-maestro", 0.0, 0.0, 1920.0, 1080.0),
+                    monitor("peer-laptop", -1920.0, 0.0, 1920.0, 1080.0),
+                ],
+            ),
+        ];
+        let shared = vec![SharedMonitor {
+            hardware: "PKB036E:D2NEE0014200".into(),
+            showing: MonitorKey {
+                device: ME,
+                monitor: "me-laptop".into(),
+            },
+            hidden: vec![MonitorKey {
+                device: PEER,
+                monitor: "peer-maestro".into(),
+            }],
+        }];
+        let mut s = Switcher::new(ME, PARK);
+        s.set_environment(
+            Topology::build_sharing(&devices, &LayoutDoc::default(), &shared),
+            PARK,
+        );
+        // Its main monitor is the one showing this computer.
+        let actions = s.jump_to(PEER);
+        assert_eq!(actions.last(), Some(&at(PEER, -960.0, 540.0)));
+    }
+
+    #[test]
+    fn a_computer_whose_only_monitor_shows_another_cant_be_reached() {
+        let devices = vec![
+            device(ME, vec![monitor("me", 0.0, 0.0, 1920.0, 1080.0)]),
+            device(PEER, vec![monitor("peer", 0.0, 0.0, 1920.0, 1080.0)]),
+        ];
+        let shared = vec![SharedMonitor {
+            hardware: "PKB036E:D2NEE0014200".into(),
+            showing: MonitorKey {
+                device: ME,
+                monitor: "me".into(),
+            },
+            hidden: vec![MonitorKey {
+                device: PEER,
+                monitor: "peer".into(),
+            }],
+        }];
+        let mut s = Switcher::new(ME, PARK);
+        s.set_environment(
+            Topology::build_sharing(&devices, &LayoutDoc::default(), &shared),
+            PARK,
+        );
+        assert!(s.jump_to(PEER).is_empty());
+        assert_eq!(s.controlling(), None);
     }
 
     #[test]

@@ -29,6 +29,7 @@ use hk_core::geometry::Point;
 use hk_core::input::InputEvent;
 use hk_core::layout::Monitor;
 use hk_core::screens::ScreenImage;
+use hk_core::shared_monitors::MonitorIdentity;
 use windows::Win32::System::Com::CoTaskMemFree;
 use windows::Win32::System::Threading::{
     GetCurrentProcess, PROCESS_POWER_THROTTLING_CURRENT_VERSION,
@@ -251,6 +252,10 @@ fn move_cursor(to: Point) {
 impl Platform for NativePlatform {
     fn monitors(&self) -> Vec<Monitor> {
         displays::enumerate()
+    }
+
+    fn monitor_identities(&self) -> Vec<MonitorIdentity> {
+        displays::identities()
     }
 
     fn model(&self) -> Option<String> {

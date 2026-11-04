@@ -277,6 +277,13 @@ describe("screensChanged", () => {
     expect(screensChanged([on("a", "one")], [on("a", "two")])).toBe(true);
   });
 
+  it("isn't about a monitor plugged into two PCs going from one to the other", () => {
+    const shared = { hardware: "PKB036E:D2NEE0014200", devices: ["a", "b"] };
+    const before = [on("a", "laptop"), on("b", "laptop"), { ...on("a", "maestro"), shared }];
+    const after = [on("a", "laptop"), on("b", "laptop"), { ...on("b", "maestro"), shared }];
+    expect(screensChanged(before, after)).toBe(false);
+  });
+
   it("isn't about PCs being paired or forgotten", () => {
     const here = [on("a", "one")];
     const withAnother = [on("a", "one"), on("b", "two")];

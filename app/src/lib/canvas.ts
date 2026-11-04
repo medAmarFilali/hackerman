@@ -160,15 +160,16 @@ export function visibleCrossings(crossings: Crossing[]): Crossing[] {
 
 /**
  * Whether a PC has different screens than before: one plugged in or unplugged. A PC being
- * paired or forgotten isn't that, as the PC itself came or went.
+ * paired or forgotten isn't that, as the PC itself came or went, and neither is a monitor
+ * plugged into several PCs going from one to another, which the user just said it did.
  */
 export function screensChanged(
-  before: { device: string; monitor: string }[],
-  after: { device: string; monitor: string }[],
+  before: { device: string; monitor: string; shared?: unknown }[],
+  after: { device: string; monitor: string; shared?: unknown }[],
 ): boolean {
-  const monitorsOf = (screens: { device: string; monitor: string }[], device: string) =>
+  const monitorsOf = (screens: { device: string; monitor: string; shared?: unknown }[], device: string) =>
     screens
-      .filter((screen) => screen.device === device)
+      .filter((screen) => screen.device === device && !screen.shared)
       .map((screen) => screen.monitor)
       .sort()
       .join("\n");

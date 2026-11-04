@@ -21,6 +21,7 @@ import { createContext, useContext, useEffect, useMemo, useRef, useState } from 
 import { DeviceIcon, NumberBadge, type Presence, ScreenStand } from "@/components/Art";
 import { ScreenViewer } from "@/components/ScreenViewer";
 import { Button } from "@/components/ui/button";
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import {
   type Crossing,
   type DeviceRect,
@@ -37,7 +38,13 @@ import {
   visibleCrossings,
 } from "@/lib/canvas";
 import { useAppearance } from "@/lib/appearance";
-import { activeDevice, cantReceiveFilesBecause, deviceNumbers, isBuiltIn } from "@/lib/devices";
+import {
+  activeDevice,
+  cantReceiveFilesBecause,
+  deviceNumbers,
+  isBuiltIn,
+  sharedChoices,
+} from "@/lib/devices";
 import { useFileDrag } from "@/lib/file-drag";
 import { pictureSizeFor, useScreenPicture } from "@/lib/screen-pictures";
 import type {
@@ -507,6 +514,7 @@ export function MonitorCanvas({ state }: { state: UiState }) {
             onResizeStart={(event) => onResizeStart(event, screen)}
             onResetSize={() => resetSize(screen)}
             onView={() => setViewing(key)}
+            sharedWith={sharedChoices(state, screen)}
             appDrop={
               appDrag?.over === key ? (appDropAllowed ? "ok" : "blocked") : null
             }
@@ -740,6 +748,8 @@ interface MonitorTileProps {
   onResizeStart: (event: React.PointerEvent) => void;
   onResetSize: () => void;
   onView: () => void;
+  /** The PCs this monitor can be showing, if it's plugged into more than one. */
+  sharedWith: { device: Fingerprint; name: string }[];
   /** An app is being dragged over this screen, and whether it can go there. */
   appDrop: "ok" | "blocked" | null;
 }
@@ -764,6 +774,7 @@ function MonitorTile({
   onResizeStart,
   onResetSize,
   onView,
+  sharedWith,
   appDrop,
 }: MonitorTileProps) {
   const active = presence === "active";
@@ -880,6 +891,9 @@ function MonitorTile({
         </div>
       </div>
       {filesOver && <DropMessage name={deviceName} cantReceive={cantReceive} />}
+      {screen.shared && sharedWith.length > 1 && (
+        <ShowingPicker screen={screen} hardware={screen.shared.hardware} choices={sharedWith} />
+      )}
       {canView && (
         <Button
           size="icon-xs"
@@ -916,6 +930,52 @@ function MonitorTile({
           className="absolute right-[0.3125rem] bottom-[0.3125rem] size-[0.4375rem] rounded-br-[2px] border-r border-b border-(--frame) group-hover/handle:border-foreground"
         />
       </div>
+    </div>
+  );
+}
+
+/**
+ * For a monitor plugged into more than one PC: which one it's showing. A PC can't tell, so after
+ * switching it with the monitor's own button, the user says so here, and every PC hears of it.
+ */
+function ShowingPicker({
+  screen,
+  hardware,
+  choices,
+}: {
+  screen: ScreenView;
+  hardware: string;
+  choices: { device: Fingerprint; name: string }[];
+}) {
+  const others = choices.filter((choice) => choice.device !== screen.device).map((c) => c.name);
+  return (
+    <div
+      className="absolute right-5 bottom-1.5 z-[6]"
+      onPointerDown={(event) => event.stopPropagation()}
+      onDoubleClick={(event) => event.stopPropagation()}
+      onKeyDown={(event) => event.stopPropagation()}
+    >
+      <Select
+        value={screen.device}
+        onValueChange={(device) => send({ type: "showOnMonitor", hardware, device })}
+      >
+        <SelectTrigger
+          size="sm"
+          aria-label={`Which PC ${screen.name} is showing`}
+          title={`This monitor is plugged into ${others.join(" and ")} as well. After switching it with its own button, choose the PC it's showing here.`}
+          className="h-6 gap-1 bg-card/85 px-1.5 text-xs backdrop-blur-sm"
+        >
+          <ArrowLeftRight aria-hidden strokeWidth={1.5} className="size-3" />
+          <SelectValue />
+        </SelectTrigger>
+        <SelectContent>
+          {choices.map((choice) => (
+            <SelectItem key={choice.device} value={choice.device}>
+              Showing {choice.name}
+            </SelectItem>
+          ))}
+        </SelectContent>
+      </Select>
     </div>
   );
 }

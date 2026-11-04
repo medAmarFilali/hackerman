@@ -5,6 +5,14 @@ Versions before 0.10.0 weren't published.
 
 ## Unreleased
 
+### Added
+
+- **One monitor plugged into two computers.** It's one screen on the canvas instead of two, as
+  the computer it's showing, and its corner says which. After switching the monitor with its own
+  button, choose the computer it's showing there. Moving onto it goes to that computer, and the
+  cursor never gets lost on the copy that isn't showing. It works for monitors that give a serial
+  number, and needs this version on all the computers it's plugged into.
+
 ### Fixed
 
 - **Programs running as administrator.** The cursor froze over a program running as

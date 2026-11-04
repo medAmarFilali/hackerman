@@ -157,6 +157,12 @@ async fn receive_loop<P: Platform>(
             Message::AppAction { app, action } => {
                 let _ = events.send(Event::AppActionRequested { peer, app, action });
             }
+            Message::MonitorIdentities(identities) => {
+                let _ = events.send(Event::PeerMonitorIdentities { peer, identities });
+            }
+            Message::Showing(showing) => {
+                let _ = events.send(Event::PeerShowing { showing });
+            }
         }
     }
 }

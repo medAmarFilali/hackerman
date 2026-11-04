@@ -20,11 +20,14 @@ use hk_core::device::Fingerprint;
 use hk_core::layout::{DeviceMonitors, LayoutDoc, Monitor, Placement, Topology};
 use hk_core::rules::ReceiveFiles;
 use hk_core::rules::Rules;
+use hk_core::shared_monitors::{
+    self, MAX_HARDWARE_LENGTH, MonitorIdentity, SharedMonitor, Showing,
+};
 use hk_core::switcher::Switcher;
 use hk_ipc::{
     AppView, ControlView, DeviceStatus, DeviceView, FromAgent, IncomingFilesView, IpcConnection,
     IpcListener, PairingStage, PairingView, PictureAnswer, Request, ScreenAsk, ScreenPicture,
-    ScreenView, ThisDevice, TransferStage, TransferView, UiState,
+    ScreenView, SharedScreen, ThisDevice, TransferStage, TransferView, UiState,
 };
 use hk_net::{
     Accepted, BlobChannel, DataWriter, Discovery, DiscoveryEvent, Endpoint, FoundDevice, Identity,
@@ -33,8 +36,8 @@ use hk_net::{
 use hk_platform::{Capture, FileSource, Platform};
 use hk_proto::{
     ClipboardBlob, FEATURE_APP_ACTIONS, FEATURE_APPS, FEATURE_FILES, FEATURE_MEDIA,
-    FEATURE_SCREENS, FEATURE_SEND_FILES, FEATURES, Message, PROTOCOL_VERSION, ScreenAnswer,
-    ScreenRequest, TransferUpdate,
+    FEATURE_SCREENS, FEATURE_SEND_FILES, FEATURE_SHARED_MONITORS, FEATURES, Message,
+    PROTOCOL_VERSION, ScreenAnswer, ScreenRequest, TransferUpdate,
 };
 use tokio::runtime::Handle;
 use tokio::sync::mpsc::{self, UnboundedReceiver, UnboundedSender};
@@ -62,6 +65,8 @@ const HIGHER_DIALS_EVERY_N_TICKS: u64 = 3;
 const PAIRING_COOLDOWN: Duration = Duration::from_secs(3);
 /// A peer reporting more monitors than this is misbehaving.
 const MAX_MONITORS: usize = 64;
+/// Far longer than a monitor's ID on Windows, which names its port.
+const MAX_MONITOR_ID_LENGTH: usize = 512;
 /// Text from another device about a transfer is cut off at this many characters.
 const MAX_REPORTED_TEXT: usize = 1024;
 /// A make and model longer than this comes from a device that's misbehaving.
@@ -236,6 +241,15 @@ pub enum Event {
         app: String,
         png: Vec<u8>,
     },
+    /// What a device's monitors say they are.
+    PeerMonitorIdentities {
+        peer: Fingerprint,
+        identities: Vec<MonitorIdentity>,
+    },
+    /// Which device a monitor plugged into several is showing, as another device knows it.
+    PeerShowing {
+        showing: Showing,
+    },
     /// A device wants something done with an app here.
     MediaRequested {
         peer: Fingerprint,
@@ -322,6 +336,10 @@ struct Engine<P: Platform> {
     paired: BTreeMap<Fingerprint, PairedDevice>,
     layout: LayoutDoc,
     monitors: Vec<Monitor>,
+    /// What this device's monitors say they are, for any plugged into another device as well.
+    monitor_identities: Vec<MonitorIdentity>,
+    /// Which device each of those is showing.
+    showing: Showing,
     topology: Topology,
     discovered: BTreeMap<Fingerprint, FoundDevice>,
     sessions: BTreeMap<Fingerprint, Session>,
@@ -401,6 +419,11 @@ pub async fn run<P: Platform>(options: Options, platform: P) -> Result<()> {
         .map(|device| (device.fingerprint, device))
         .collect();
     let layout = config::load_layout(&dir)?;
+    // Only a matter of how the canvas looks, so a damaged file isn't worth stopping for.
+    let showing = config::load_showing(&dir).unwrap_or_else(|error| {
+        tracing::warn!("{error:#}");
+        Showing::default()
+    });
 
     let trust = TrustStore::new(paired.keys().copied());
     let port = options.port.unwrap_or(settings.port);
@@ -412,6 +435,7 @@ pub async fn run<P: Platform>(options: Options, platform: P) -> Result<()> {
 
     let (events_tx, events_rx) = mpsc::unbounded_channel();
     let monitors = platform.monitors();
+    let monitor_identities = platform.monitor_identities();
     let model = platform.model();
     let shared_desktop = platform.desktop_folder();
     let shared = Shared::new(
@@ -481,6 +505,8 @@ pub async fn run<P: Platform>(options: Options, platform: P) -> Result<()> {
         paired,
         layout,
         monitors,
+        monitor_identities,
+        showing,
         topology: Topology::default(),
         discovered: BTreeMap::new(),
         sessions: BTreeMap::new(),
@@ -734,7 +760,12 @@ impl<P: Platform> Engine<P> {
         if monitors != self.monitors {
             tracing::info!(count = monitors.len(), "monitors changed");
             self.monitors = monitors.clone();
+            self.monitor_identities = self.shared.platform.monitor_identities();
             self.broadcast(&Message::Monitors(monitors));
+            self.broadcast_to(
+                FEATURE_SHARED_MONITORS,
+                &Message::MonitorIdentities(self.monitor_identities.clone()),
+            );
             self.rebuild();
         }
         self.dial_paired_devices();
@@ -863,6 +894,10 @@ impl<P: Platform> Engine<P> {
             Event::RefreshApps => self.read_apps(),
             Event::PeerApps { peer, apps } => self.on_peer_apps(peer, apps),
             Event::PeerAppIcon { peer, app, png } => self.on_peer_app_icon(peer, app, png),
+            Event::PeerMonitorIdentities { peer, identities } => {
+                self.on_peer_monitor_identities(peer, identities);
+            }
+            Event::PeerShowing { showing } => self.on_peer_showing(showing),
             Event::MediaRequested { peer, app, command } => {
                 self.on_media_requested(peer, app, command);
             }
@@ -959,6 +994,7 @@ impl<P: Platform> Engine<P> {
                 self.set_screens_allowed(device, allowed);
             }
             // Handled on the way here, to say where the answer goes.
+            Request::ShowOnMonitor { hardware, device } => self.show_on_monitor(&hardware, device),
             Request::ScreenPicture { .. } => {}
             Request::Shutdown => {} // Handled by the main loop.
         }
@@ -2305,6 +2341,15 @@ impl<P: Platform> Engine<P> {
         }
         self.adopt_layout(layout);
         self.tell_peer_about_apps(peer);
+        if features & FEATURE_SHARED_MONITORS != 0
+            && let Some(session) = self.sessions.get(&peer)
+        {
+            let identities = Message::MonitorIdentities(self.monitor_identities.clone());
+            let _ = session.outgoing.send(identities);
+            let _ = session
+                .outgoing
+                .send(Message::Showing(self.showing.clone()));
+        }
         self.rebuild();
     }
 
@@ -2342,6 +2387,14 @@ impl<P: Platform> Engine<P> {
         }
     }
 
+    /// To the devices that said they can take it.
+    fn broadcast_to(&self, feature: u32, message: &Message) {
+        let sessions = self.sessions.values();
+        for session in sessions.filter(|session| session.up && session.features & feature != 0) {
+            let _ = session.outgoing.send(message.clone());
+        }
+    }
+
     // Layout
 
     fn device_monitors(&self) -> Vec<DeviceMonitors> {
@@ -2364,9 +2417,23 @@ impl<P: Platform> Engine<P> {
         devices
     }
 
+    /// The monitors plugged into more than one of these devices.
+    fn shared_monitors(&self, devices: &[DeviceMonitors]) -> Vec<SharedMonitor> {
+        let identities = std::iter::once((self.me, self.monitor_identities.clone()))
+            .chain(
+                self.paired
+                    .values()
+                    .map(|device| (device.fingerprint, device.monitor_identities.clone())),
+            )
+            .collect();
+        shared_monitors::find_shared(devices, &identities, &self.showing)
+    }
+
     /// Recalculates the canvas after anything it depends on has changed.
     fn rebuild(&mut self) {
-        self.topology = Topology::build(&self.device_monitors(), &self.layout);
+        let devices = self.device_monitors();
+        let shared = self.shared_monitors(&devices);
+        self.topology = Topology::build_sharing(&devices, &self.layout, &shared);
         let jump_order = std::iter::once(self.me)
             .chain(self.paired.keys().copied())
             .collect();
@@ -2382,10 +2449,82 @@ impl<P: Platform> Engine<P> {
 
     fn edit_layout(&mut self, placements: Vec<Placement>) {
         let devices = self.device_monitors();
-        self.layout.apply_edit(self.me, &devices, placements);
+        let shared = self.shared_monitors(&devices);
+        self.layout
+            .apply_edit_sharing(self.me, &devices, &shared, placements);
         self.save_layout();
         self.broadcast(&Message::Layout(self.layout.clone()));
         self.rebuild();
+    }
+
+    /// The user says this monitor, plugged into more than one device, is showing `device`
+    /// now. It goes where the copy shown so far was, so nothing on the canvas moves.
+    fn show_on_monitor(&mut self, hardware: &str, device: Fingerprint) {
+        let devices = self.device_monitors();
+        let shared = self.shared_monitors(&devices);
+        let Some(monitor) = shared.iter().find(|monitor| monitor.hardware == hardware) else {
+            return;
+        };
+        let Some(copy) = monitor.copy_on(device).cloned() else {
+            return;
+        };
+        let was_at = self
+            .topology
+            .screens
+            .iter()
+            .find(|s| s.device == monitor.showing.device && s.monitor.id == monitor.showing.monitor)
+            .map(|screen| (screen.canvas, screen.custom_width));
+        tracing::info!(%device, "a monitor plugged into more than one device is showing another");
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map_or(0, |since| since.as_millis() as u64);
+        self.showing.choose(hardware, device, now, self.me);
+        if let Err(error) = config::save_showing(&self.options.config_dir, &self.showing) {
+            tracing::warn!("can't save which device a monitor is showing: {error:#}");
+        }
+        self.broadcast_to(
+            FEATURE_SHARED_MONITORS,
+            &Message::Showing(self.showing.clone()),
+        );
+        match was_at {
+            Some((canvas, width)) => self.edit_layout(vec![Placement {
+                device: copy.device,
+                monitor: copy.monitor,
+                x: canvas.x,
+                y: canvas.y,
+                width,
+            }]),
+            None => self.rebuild(),
+        }
+    }
+
+    fn on_peer_monitor_identities(
+        &mut self,
+        peer: Fingerprint,
+        mut identities: Vec<MonitorIdentity>,
+    ) {
+        let Some(device) = self.paired.get_mut(&peer) else {
+            return;
+        };
+        identities.retain(|identity| {
+            identity.hardware.len() <= MAX_HARDWARE_LENGTH
+                && identity.monitor.len() <= MAX_MONITOR_ID_LENGTH
+        });
+        identities.truncate(MAX_MONITORS);
+        if device.monitor_identities != identities {
+            device.monitor_identities = identities;
+            self.save_devices();
+            self.rebuild();
+        }
+    }
+
+    fn on_peer_showing(&mut self, showing: Showing) {
+        if self.showing.merge(showing) {
+            if let Err(error) = config::save_showing(&self.options.config_dir, &self.showing) {
+                tracing::warn!("can't save which device a monitor is showing: {error:#}");
+            }
+            self.rebuild();
+        }
     }
 
     fn adopt_layout(&mut self, layout: LayoutDoc) {
@@ -2515,6 +2654,7 @@ impl<P: Platform> Engine<P> {
                         monitors: Vec::new(),
                         files_allowed: false,
                         screens_allowed: false,
+                        monitor_identities: Vec::new(),
                     },
                 );
                 self.save_devices();
@@ -2566,6 +2706,7 @@ impl<P: Platform> Engine<P> {
             (None, Some(device)) => ControlView::ControlledBy { device },
             (None, None) => ControlView::Home,
         };
+        let shared = self.shared_monitors(&self.device_monitors());
         UiState {
             me: ThisDevice {
                 fingerprint: self.me,
@@ -2580,6 +2721,7 @@ impl<P: Platform> Engine<P> {
                 .topology
                 .screens
                 .iter()
+                .filter(|screen| !screen.hidden)
                 .map(|screen| ScreenView {
                     device: screen.device,
                     monitor: screen.monitor.id.clone(),
@@ -2595,6 +2737,16 @@ impl<P: Platform> Engine<P> {
                     primary: screen.monitor.primary,
                     online: screen.online,
                     apps: self.apps_on(screen.device, &screen.monitor),
+                    shared: shared
+                        .iter()
+                        .find(|monitor| {
+                            monitor.showing.device == screen.device
+                                && monitor.showing.monitor == screen.monitor.id
+                        })
+                        .map(|monitor| SharedScreen {
+                            hardware: monitor.hardware.clone(),
+                            devices: monitor.devices(),
+                        }),
                 })
                 .collect(),
             pairing: self.pairing.as_ref().map(|pairing| pairing.view.clone()),

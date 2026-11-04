@@ -11,6 +11,7 @@ use anyhow::{Context, Result};
 use hk_core::device::Fingerprint;
 use hk_core::layout::{LayoutDoc, Monitor};
 use hk_core::rules::Rules;
+use hk_core::shared_monitors::{MonitorIdentity, Showing};
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 
@@ -112,6 +113,9 @@ pub struct PairedDevice {
     /// The user said it can see this computer's screens.
     #[serde(default)]
     pub screens_allowed: bool,
+    /// What its monitors said they were, for a monitor plugged into it and another device.
+    #[serde(default)]
+    pub monitor_identities: Vec<MonitorIdentity>,
 }
 
 pub fn load_devices(dir: &Path) -> Result<Vec<PairedDevice>> {
@@ -128,6 +132,15 @@ pub fn load_layout(dir: &Path) -> Result<LayoutDoc> {
 
 pub fn save_layout(dir: &Path, layout: &LayoutDoc) -> Result<()> {
     save_json(&dir.join("layout.json"), layout)
+}
+
+/// Which device each monitor plugged into several of them is showing.
+pub fn load_showing(dir: &Path) -> Result<Showing> {
+    load_json(&dir.join("shared-monitors.json"))
+}
+
+pub fn save_showing(dir: &Path, showing: &Showing) -> Result<()> {
+    save_json(&dir.join("shared-monitors.json"), showing)
 }
 
 fn load_json<T: DeserializeOwned + Default>(path: &Path) -> Result<T> {
