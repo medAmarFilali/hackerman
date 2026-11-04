@@ -3,7 +3,7 @@
 Downloads are on the [releases page](https://github.com/medAmarFilali/hackerman/releases).
 Versions before 0.10.0 weren't published.
 
-## Unreleased
+## 0.11.0
 
 ### Added
 

@@ -1676,7 +1676,7 @@ dependencies = [
 
 [[package]]
 name = "hackerman-app"
-version = "0.10.0"
+version = "0.11.0"
 dependencies = [
  "hk-core",
  "hk-daemon",
@@ -1744,7 +1744,7 @@ checksum = "7f24254aa9a54b5c858eaee2f5bccdb46aaf0e486a595ed5fd8f86ba55232a70"
 
 [[package]]
 name = "hk-core"
-version = "0.10.0"
+version = "0.11.0"
 dependencies = [
  "keyboard-types",
  "postcard",
@@ -1757,7 +1757,7 @@ dependencies = [
 
 [[package]]
 name = "hk-daemon"
-version = "0.10.0"
+version = "0.11.0"
 dependencies = [
  "anyhow",
  "arboard",
@@ -1779,7 +1779,7 @@ dependencies = [
 
 [[package]]
 name = "hk-ipc"
-version = "0.10.0"
+version = "0.11.0"
 dependencies = [
  "hk-core",
  "serde",
@@ -1790,7 +1790,7 @@ dependencies = [
 
 [[package]]
 name = "hk-net"
-version = "0.10.0"
+version = "0.11.0"
 dependencies = [
  "hk-core",
  "hk-proto",
@@ -1808,7 +1808,7 @@ dependencies = [
 
 [[package]]
 name = "hk-platform"
-version = "0.10.0"
+version = "0.11.0"
 dependencies = [
  "arboard",
  "hk-core",
@@ -1823,7 +1823,7 @@ dependencies = [
 
 [[package]]
 name = "hk-proto"
-version = "0.10.0"
+version = "0.11.0"
 dependencies = [
  "hk-core",
  "keyboard-types",
@@ -1834,7 +1834,7 @@ dependencies = [
 
 [[package]]
 name = "hk-win-service"
-version = "0.10.0"
+version = "0.11.0"
 dependencies = [
  "anyhow",
  "hk-core",
