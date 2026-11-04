@@ -942,8 +942,6 @@ mod tests {
     use std::sync::atomic::AtomicUsize;
 
     use hk_core::input::{KeyCode, MouseButton};
-    use windows::Win32::Security::TOKEN_QUERY;
-    use windows::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
 
     use super::*;
 
@@ -1020,10 +1018,20 @@ mod tests {
     };
 
     fn me() -> String {
-        let mut token = HANDLE::default();
-        unsafe { OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &raw mut token) }.unwrap();
-        let token = unsafe { Owned::new(token) };
-        session::account_of(*token).unwrap()
+        session::own_account().unwrap()
+    }
+
+    /// Who the pipes made here belong to, which is who an agent here has to accept. That's this
+    /// account, or the administrators when running with their rights, as on GitHub's machines.
+    fn my_pipes_owner() -> String {
+        static OWNER: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+        OWNER
+            .get_or_init(|| {
+                let name = channel("owner");
+                let _helper = Pipe::create(&name, &me()).unwrap();
+                Pipe::open(&name).unwrap().owner().unwrap()
+            })
+            .clone()
     }
 
     fn channel(name: &str) -> String {
@@ -1115,7 +1123,7 @@ mod tests {
 
     #[test]
     fn with_no_helper_the_agent_does_it_all_itself() {
-        let (relay, here) = agent(&channel("alone"), vec![me()]);
+        let (relay, here) = agent(&channel("alone"), vec![my_pipes_owner()]);
         let seen = Arc::new(AtomicUsize::new(0));
         let capture = relay.capture(handler(&seen)).unwrap();
 
@@ -1141,7 +1149,7 @@ mod tests {
     fn with_the_helper_there_it_does_the_input_work() {
         let channel = channel("helper");
         let helper = Helper::start(&channel);
-        let (relay, here) = agent(&channel, vec![me()]);
+        let (relay, here) = agent(&channel, vec![my_pipes_owner()]);
         let seen = Arc::new(AtomicUsize::new(0));
         let capture = relay.capture(handler(&seen)).unwrap();
 
@@ -1171,7 +1179,7 @@ mod tests {
     #[test]
     fn a_helper_that_comes_later_takes_over_and_the_parked_cursor_stays_hidden() {
         let channel = channel("later");
-        let (relay, here) = agent(&channel, vec![me()]);
+        let (relay, here) = agent(&channel, vec![my_pipes_owner()]);
         let seen = Arc::new(AtomicUsize::new(0));
         let _capture = relay.capture(handler(&seen)).unwrap();
         relay.park(Point::new(7.0, 8.0));
@@ -1191,7 +1199,7 @@ mod tests {
     fn when_the_helper_goes_the_agent_takes_its_hooks_back() {
         let channel = channel("goes");
         let helper = Helper::start(&channel);
-        let (relay, here) = agent(&channel, vec![me()]);
+        let (relay, here) = agent(&channel, vec![my_pipes_owner()]);
         let seen = Arc::new(AtomicUsize::new(0));
         let _capture = relay.capture(handler(&seen)).unwrap();
         eventually("the helper's hooks take over", || !here.has_hooks());
@@ -1214,7 +1222,7 @@ mod tests {
     fn an_agent_that_takes_too_long_gets_its_hooks_back_and_loses_nothing_it_sent() {
         let channel = channel("slow");
         let helper = Helper::start(&channel);
-        let (relay, here) = agent(&channel, vec![me()]);
+        let (relay, here) = agent(&channel, vec![my_pipes_owner()]);
         let slow = Arc::new(AtomicBool::new(true));
         let _capture = {
             let slow = slow.clone();
@@ -1273,8 +1281,15 @@ mod tests {
     fn a_pipe_that_isnt_the_systems_is_never_used() {
         let channel = channel("pretender");
         let helper = Helper::start(&channel);
-        // The real agent only accepts the system's: this helper is the test's own account.
-        let (relay, here) = agent(&channel, HELPER_ACCOUNTS.map(String::from).to_vec());
+        // The real agent only accepts the system's, or the administrators'. This test's pipe
+        // belongs to its own account, unless it's running with administrators' rights, so this
+        // agent is told to accept everyone the real one does except that.
+        let owners = HELPER_ACCOUNTS
+            .into_iter()
+            .filter(|account| *account != my_pipes_owner())
+            .map(String::from)
+            .collect();
+        let (relay, here) = agent(&channel, owners);
         let seen = Arc::new(AtomicUsize::new(0));
         let _capture = relay.capture(handler(&seen)).unwrap();
         std::thread::sleep(Duration::from_millis(300));
