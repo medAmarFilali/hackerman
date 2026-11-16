@@ -4,6 +4,7 @@
 use std::io::Read;
 use std::os::windows::process::CommandExt;
 use std::process::{Command, Stdio};
+use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
 use hk_core::dev::ToolVersion;
@@ -48,15 +49,18 @@ fn run_exactly(
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Err(Missing),
         Err(error) => return Ok(Err(error.to_string())),
     };
-    // Read as it comes, or a tool writing a lot would wait for room forever.
+    // Read as it comes, or a tool writing a lot would wait for room forever. A program it started
+    // can keep the output open after it ends, so the reading is never waited on for long.
     let read = |stream: Option<Box<dyn Read + Send>>| {
+        let (sender, receiver) = mpsc::channel();
         std::thread::spawn(move || {
             let mut text = Vec::new();
             if let Some(mut stream) = stream {
                 let _ = stream.read_to_end(&mut text);
             }
-            String::from_utf8_lossy(&text).into_owned()
-        })
+            let _ = sender.send(String::from_utf8_lossy(&text).into_owned());
+        });
+        receiver
     };
     let out = read(
         child
@@ -76,6 +80,7 @@ fn run_exactly(
         match child.try_wait() {
             Ok(Some(status)) => break Some(status),
             Ok(None) if started.elapsed() >= within => {
+                stop_with_what_it_started(child.id());
                 let _ = child.kill();
                 let _ = child.wait();
                 break None;
@@ -84,15 +89,29 @@ fn run_exactly(
             Err(_) => break None,
         }
     };
-    let (out, err) = (
-        out.join().unwrap_or_default(),
-        err.join().unwrap_or_default(),
-    );
+    let collect =
+        |text: mpsc::Receiver<String>| text.recv_timeout(OUTPUT_AFTER_EXIT).unwrap_or_default();
+    let (out, err) = (collect(out), collect(err));
     Ok(match status {
         Some(status) if status.success() => Ok(out.trim().to_string()),
         Some(_) => Err(first_line(if err.trim().is_empty() { &out } else { &err })),
         None => Err(format!("{program} took too long")),
     })
+}
+
+/// How long what a tool wrote is waited for once it has ended.
+const OUTPUT_AFTER_EXIT: Duration = Duration::from_secs(2);
+
+/// Ends a program and every program it started. A batch file like `npm.cmd` runs in `cmd.exe`,
+/// which starts the real tool, and ending only `cmd.exe` would leave that running.
+fn stop_with_what_it_started(pid: u32) {
+    let _ = Command::new("taskkill")
+        .args(["/T", "/F", "/PID", &pid.to_string()])
+        .creation_flags(CREATE_NO_WINDOW.0)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status();
 }
 
 fn first_line(text: &str) -> String {
@@ -175,16 +194,41 @@ mod tests {
         assert!(run("where", &["hackerman-no-such-file"], QUICK).is_err());
     }
 
+    /// As with a batch file like `npm.cmd`, `cmd.exe` starts the program that does the work, which
+    /// holds the output open. Both are stopped, and the answer doesn't wait for either.
     #[test]
-    fn a_tool_that_takes_too_long_is_stopped() {
+    fn a_tool_that_takes_too_long_is_stopped_with_what_it_started() {
+        let marker = format!("hackerman-test-{}", std::process::id());
         let started = Instant::now();
         let result = run(
-            "ping",
-            &["-n", "30", "127.0.0.1"],
-            Duration::from_millis(500),
+            "cmd",
+            &[
+                "/c",
+                "powershell",
+                "-NoProfile",
+                "-Command",
+                &format!("Start-Sleep 60 # {marker}"),
+            ],
+            Duration::from_secs(1),
         );
-        assert_eq!(result, Err("ping took too long".into()));
-        assert!(started.elapsed() < Duration::from_secs(5));
+        assert_eq!(result, Err("cmd took too long".into()));
+        assert!(
+            started.elapsed() < Duration::from_secs(8),
+            "{:?}",
+            started.elapsed()
+        );
+
+        let left = super::super::processes::snapshot()
+            .into_iter()
+            .filter(|process| {
+                process
+                    .command_line
+                    .as_deref()
+                    .is_some_and(|line| line.contains(&marker))
+            })
+            .map(|process| process.name)
+            .collect::<Vec<_>>();
+        assert!(left.is_empty(), "still running: {left:?}");
     }
 
     /// Only looks. Run with `--nocapture` to see what's installed.

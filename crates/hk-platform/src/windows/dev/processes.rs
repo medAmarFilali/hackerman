@@ -1,6 +1,7 @@
 //! The processes running here, how much memory they use, and stopping them.
 
 use std::collections::HashMap;
+use std::time::{Duration, Instant};
 
 use hk_core::dev::{
     self, MAX_LISTED, ProcessInfo, Program, ProgramId, ProgramKind, ProgramsReport,
@@ -17,7 +18,7 @@ use windows::Win32::System::RemoteDesktop::ProcessIdToSessionId;
 use windows::Win32::System::SystemInformation::{GlobalMemoryStatusEx, MEMORYSTATUSEX};
 use windows::Win32::System::Threading::{
     GetCurrentProcessId, GetProcessTimes, OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION,
-    PROCESS_TERMINATE, TerminateProcess,
+    PROCESS_SYNCHRONIZE, PROCESS_TERMINATE, TerminateProcess, WaitForSingleObject,
 };
 use windows::core::Owned;
 
@@ -309,11 +310,18 @@ pub(super) fn stop(program: ProgramId) -> Result<String, String> {
     if unstoppable {
         return Err(format!("{named} is part of Windows, or isn't this user's"));
     }
-    let mut stopped = 0;
-    for member in members.iter().rev() {
-        if terminate(*member) {
-            stopped += 1;
-        }
+    let ending: Vec<Owned<HANDLE>> = members
+        .iter()
+        .rev()
+        .filter_map(|member| terminate(*member))
+        .collect();
+    let stopped = ending.len();
+    // Windows only starts ending them. Waiting means a look straight after doesn't still see them.
+    let deadline = Instant::now() + ENDING_TAKES_AT_MOST;
+    for handle in &ending {
+        let left = deadline.saturating_duration_since(Instant::now());
+        // SAFETY: the handle is open, with the right to wait on it.
+        unsafe { WaitForSingleObject(**handle, left.as_millis() as u32) };
     }
     if stopped == 0 {
         return Err(format!("Windows wouldn't stop {named}"));
@@ -324,19 +332,23 @@ pub(super) fn stop(program: ProgramId) -> Result<String, String> {
     })
 }
 
-fn terminate(process: ProgramId) -> bool {
+/// How long stopping a program waits for its processes to be gone.
+const ENDING_TAKES_AT_MOST: Duration = Duration::from_secs(3);
+
+/// Starts ending a process, and gives it to wait on if that worked.
+fn terminate(process: ProgramId) -> Option<Owned<HANDLE>> {
     // SAFETY: the handle is owned as soon as it exists. It's checked to be the same process
     // before it's stopped.
     unsafe {
-        let Ok(handle) = OpenProcess(
-            PROCESS_TERMINATE | PROCESS_QUERY_LIMITED_INFORMATION,
+        let handle = OpenProcess(
+            PROCESS_TERMINATE | PROCESS_QUERY_LIMITED_INFORMATION | PROCESS_SYNCHRONIZE,
             false,
             process.pid,
-        ) else {
-            return false;
-        };
+        )
+        .ok()?;
         let handle = Owned::new(handle);
-        started(*handle) == process.started && TerminateProcess(*handle, 1).is_ok()
+        (started(*handle) == process.started && TerminateProcess(*handle, 1).is_ok())
+            .then_some(handle)
     }
 }
 

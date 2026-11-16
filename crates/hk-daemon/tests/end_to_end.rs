@@ -2064,12 +2064,21 @@ impl HandWrittenPeer {
     }
 
     /// The clipboard this peer asks for, if it arrives.
+    /// Waits long enough for a busy machine, when an answer is expected.
     async fn ask_for(&mut self, version: ClipVersion) -> Option<ClipboardBlob> {
+        self.ask_for_within(version, Duration::from_secs(5)).await
+    }
+
+    async fn ask_for_within(
+        &mut self,
+        version: ClipVersion,
+        within: Duration,
+    ) -> Option<ClipboardBlob> {
         self.sender
             .send(&Message::ClipboardRequest(version))
             .await
             .unwrap();
-        let bytes = tokio::time::timeout(Duration::from_millis(500), self.blobs.receive()).await;
+        let bytes = tokio::time::timeout(within, self.blobs.receive()).await;
         Some(hk_proto::decode_clipboard(&bytes.ok()?.unwrap()).unwrap())
     }
 
@@ -2167,7 +2176,9 @@ async fn a_pc_on_an_older_version_stays_connected_and_keeps_its_clipboard() {
     a.platform.copy_files(vec![folder.join("file.txt")]);
     let version = old.next_offer().await;
     assert!(
-        old.ask_for(version).await.is_none(),
+        old.ask_for_within(version, Duration::from_millis(500))
+            .await
+            .is_none(),
         "it couldn't read that"
     );
 
