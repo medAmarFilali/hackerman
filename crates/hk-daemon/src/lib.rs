@@ -6,6 +6,7 @@
 
 mod clipboard;
 mod config;
+mod dev;
 mod engine;
 mod files;
 pub mod lock_screen;

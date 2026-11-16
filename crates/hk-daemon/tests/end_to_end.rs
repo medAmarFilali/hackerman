@@ -11,6 +11,7 @@ use std::time::{Duration, Instant};
 use base64::Engine as _;
 use hk_core::apps::{AppAction, MediaCommand, MediaState, RunningApp};
 use hk_core::clipboard::{ClipVersion, ClipboardData, ClipboardImage, SharedFile};
+use hk_core::dev::{DevReply, DevRequest, Program, ProgramId, ProgramKind, ProgramsReport};
 use hk_core::device::Fingerprint;
 use hk_core::geometry::{Point, Rect};
 use hk_core::input::{InputEvent, KeyCode};
@@ -21,8 +22,8 @@ use hk_core::shared_monitors::MonitorIdentity;
 use hk_core::switcher::LocalEvent;
 use hk_daemon::{Options, lock_screen, run};
 use hk_ipc::{
-    ControlView, DeviceStatus, FromAgent, IpcConnection, PairingStage, PictureAnswer, Request,
-    ScreenAsk, ScreenPicture, TransferStage, UiState,
+    ControlView, DevAnswer, DeviceStatus, FromAgent, IpcConnection, PairingStage, PictureAnswer,
+    Request, ScreenAsk, ScreenPicture, TransferStage, UiState,
 };
 use hk_net::{Endpoint, Identity, TrustStore};
 use hk_platform::Platform;
@@ -46,6 +47,8 @@ struct Device {
     state: UiState,
     /// Answers about pictures that nothing has looked at yet.
     pictures: Vec<ScreenPicture>,
+    /// Answers in developer mode that nothing has looked at yet.
+    dev_answers: Vec<DevAnswer>,
     task: JoinHandle<anyhow::Result<()>>,
     dir: PathBuf,
     keep_dir: bool,
@@ -131,6 +134,7 @@ impl Device {
             app: Some(app),
             state,
             pictures: Vec::new(),
+            dev_answers: Vec::new(),
             task,
             dir,
             keep_dir: false,
@@ -190,6 +194,7 @@ impl Device {
         {
             FromAgent::State(state) => self.state = *state,
             FromAgent::Picture(picture) => self.pictures.push(picture),
+            FromAgent::Dev(answer) => self.dev_answers.push(answer),
         }
     }
 
@@ -225,6 +230,28 @@ impl Device {
         tokio::time::timeout(TIMEOUT, wait)
             .await
             .expect("no answer about a picture")
+    }
+
+    /// Asks a device something in developer mode, the way the app does, and waits for the answer.
+    async fn ask_dev(&mut self, device: Fingerprint, request: DevRequest) -> DevReply {
+        let id = u64::from(unique_id());
+        self.request(Request::Dev {
+            id,
+            device,
+            request,
+        })
+        .await;
+        let wait = async {
+            loop {
+                if let Some(at) = self.dev_answers.iter().position(|answer| answer.id == id) {
+                    return self.dev_answers.remove(at).reply;
+                }
+                self.next_from_agent().await;
+            }
+        };
+        tokio::time::timeout(TIMEOUT, wait)
+            .await
+            .expect("no answer in developer mode")
     }
 
     async fn wait_connected_to(&mut self, other: Fingerprint) {
@@ -4964,4 +4991,194 @@ async fn only_an_app_with_a_window_can_be_brought_up() {
     };
     assert!(has_window("msedge"));
     assert!(!has_window("spotify"));
+}
+
+// Developer mode
+
+/// A Next.js dev server using 2 GB, as developer mode would find it.
+fn a_next_dev_server() -> ProgramsReport {
+    ProgramsReport {
+        programs: vec![Program {
+            id: ProgramId {
+                pid: 4242,
+                started: 1,
+            },
+            kind: ProgramKind::NextJs,
+            name: "Next.js".into(),
+            project: Some("site".into()),
+            memory: 2 * 1024 * 1024 * 1024,
+            processes: 3,
+            can_stop: true,
+        }],
+        memory_total: 32 * 1024 * 1024 * 1024,
+        memory_used: 8 * 1024 * 1024 * 1024,
+        ..ProgramsReport::default()
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn developer_mode_answers_about_this_pc() {
+    let mut a = Device::start("a").await;
+    a.platform.set_dev_programs(a_next_dev_server());
+    let me = a.fingerprint();
+    let DevReply::Programs(report) = a.ask_dev(me, DevRequest::Programs).await else {
+        panic!("not a list of programs");
+    };
+    assert_eq!(report.programs[0].name, "Next.js");
+    let stopped = a
+        .ask_dev(
+            me,
+            DevRequest::Stop {
+                program: report.programs[0].id,
+            },
+        )
+        .await;
+    assert_eq!(
+        stopped,
+        DevReply::Done {
+            summary: "Stopped Next.js".into()
+        }
+    );
+}
+
+/// Seeing and stopping what runs on another PC is that PC's user's choice.
+#[tokio::test(flavor = "multi_thread")]
+async fn another_pc_only_answers_once_it_allows_this_one() {
+    let (mut a, mut b) = side_by_side().await;
+    b.platform.set_dev_programs(a_next_dev_server());
+    let (a_id, b_id) = (a.fingerprint(), b.fingerprint());
+
+    let DevReply::Refused { reason } = a.ask_dev(b_id, DevRequest::Programs).await else {
+        panic!("answered without being allowed");
+    };
+    assert!(reason.contains("Settings"), "{reason}");
+    assert!(
+        b.platform.dev_requests().is_empty(),
+        "nothing was looked at"
+    );
+
+    b.request(Request::SetDeveloperAllowed {
+        device: a_id,
+        allowed: true,
+    })
+    .await;
+    b.wait_for("allowed", |s| {
+        s.devices
+            .iter()
+            .any(|d| d.fingerprint == a_id && d.developer_allowed)
+    })
+    .await;
+    a.wait_for("b has developer mode", |s| {
+        s.devices
+            .iter()
+            .any(|d| d.fingerprint == b_id && d.has_developer_mode)
+    })
+    .await;
+
+    let DevReply::Programs(report) = a.ask_dev(b_id, DevRequest::Programs).await else {
+        panic!("not a list of programs");
+    };
+    assert_eq!(report.programs.len(), 1);
+    let stopped = a
+        .ask_dev(
+            b_id,
+            DevRequest::Stop {
+                program: report.programs[0].id,
+            },
+        )
+        .await;
+    assert_eq!(
+        stopped,
+        DevReply::Done {
+            summary: "Stopped Next.js".into()
+        }
+    );
+
+    // Its user is told what was done there, and by whom.
+    b.wait_for("told", |s| {
+        s.dev_notices
+            .iter()
+            .any(|n| n.title.starts_with(&a.name) && n.text == "Stopped Next.js")
+    })
+    .await;
+    // Looking isn't worth telling.
+    assert_eq!(b.state.dev_notices.len(), 1);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_pc_on_an_older_version_is_said_to_need_updating() {
+    let (mut a, old) = device_with_hand_written_peer(FEATURES & !hk_proto::FEATURE_DEVELOPER).await;
+    let DevReply::Refused { reason } = a.ask_dev(old.id, DevRequest::Programs).await else {
+        panic!("asked a PC that can't answer");
+    };
+    assert!(reason.contains("0.12.0"), "{reason}");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn memory_alerts_reach_this_pc_and_the_ones_allowed_to_see_it() {
+    let (mut a, mut b) = side_by_side().await;
+    let (a_id, b_id) = (a.fingerprint(), b.fingerprint());
+    b.request(Request::SetDeveloperAllowed {
+        device: a_id,
+        allowed: true,
+    })
+    .await;
+    a.wait_for("b has developer mode", |s| {
+        s.devices
+            .iter()
+            .any(|d| d.fingerprint == b_id && d.has_developer_mode)
+    })
+    .await;
+    b.platform.set_dev_programs(a_next_dev_server());
+
+    let mut rules = b.state.rules.clone();
+    rules.memory_alerts.enabled = true;
+    rules.memory_alerts.limit_mb = 1024;
+    b.request(Request::SetRules { rules }).await;
+
+    b.wait_for("an alert here", |s| {
+        s.dev_notices.iter().any(|n| {
+            n.title == "Memory alert" && n.text.starts_with("Next.js (site) is using 2.0 GB")
+        })
+    })
+    .await;
+    a.wait_for("and on the PC allowed to see it", |s| {
+        s.dev_notices
+            .iter()
+            .any(|n| n.title == format!("Memory on {}", b.name) && n.text.contains("Next.js"))
+    })
+    .await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn memory_alerts_are_off_until_turned_on() {
+    let mut a = Device::start("a").await;
+    a.platform.set_dev_programs(a_next_dev_server());
+    // A couple of regular looks at what's running.
+    tokio::time::sleep(TICK_AND_A_BIT * 2).await;
+    a.request(Request::SetLocked { locked: false }).await;
+    a.next_from_agent().await;
+    assert!(a.state.dev_notices.is_empty());
+    assert!(
+        !a.platform
+            .dev_requests()
+            .iter()
+            .any(|(request, _)| *request == DevRequest::Programs),
+        "nothing was even looked at"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn the_folders_chosen_are_where_projects_are_looked_for() {
+    let mut a = Device::start("a").await;
+    let mut rules = a.state.rules.clone();
+    rules.dev_folders = vec![r"C:\code".into()];
+    a.request(Request::SetRules { rules }).await;
+    a.wait_for("saved", |s| !s.rules.dev_folders.is_empty())
+        .await;
+    let me = a.fingerprint();
+    a.ask_dev(me, DevRequest::Disk).await;
+    let asked = a.platform.dev_requests();
+    let (_, folders) = asked.last().unwrap();
+    assert_eq!(folders, &[std::path::PathBuf::from(r"C:\code")]);
 }

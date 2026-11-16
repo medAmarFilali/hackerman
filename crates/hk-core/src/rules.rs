@@ -39,6 +39,11 @@ pub struct Rules {
     pub app_control: bool,
     /// Keyboard shortcuts for what's playing, here or on another device.
     pub media_shortcuts: MediaShortcuts,
+    /// A notification when one program here uses more memory than it should.
+    pub memory_alerts: MemoryAlerts,
+    /// Where developer mode looks for projects' build folders. With none, it looks in the usual
+    /// places in the user's own folder.
+    pub dev_folders: Vec<String>,
 }
 
 impl Default for Rules {
@@ -58,6 +63,26 @@ impl Default for Rules {
             media_control: true,
             app_control: true,
             media_shortcuts: MediaShortcuts::default(),
+            memory_alerts: MemoryAlerts::default(),
+            dev_folders: Vec::new(),
+        }
+    }
+}
+
+/// Off unless the user turns it on.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct MemoryAlerts {
+    pub enabled: bool,
+    /// How much one program can use before it's said, in megabytes.
+    pub limit_mb: u32,
+}
+
+impl Default for MemoryAlerts {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            limit_mb: 4096,
         }
     }
 }

@@ -33,6 +33,8 @@ export type Request =
   | { type: "setScreensAllowed"; device: Fingerprint; allowed: boolean }
   /** A monitor plugged into more than one PC is showing this one now. */
   | { type: "showOnMonitor"; hardware: string; device: Fingerprint }
+  /** Whether a PC can use developer mode on this one. */
+  | { type: "setDeveloperAllowed"; device: Fingerprint; allowed: boolean }
   | { type: "shutdown" };
 
 export type MediaCommand = "playPause" | "back" | "forward";
@@ -101,6 +103,16 @@ export interface Rules {
   /** Let other PCs bring apps here to the front, and move them between the screens here. */
   appControl: boolean;
   mediaShortcuts: MediaShortcuts;
+  /** A notification when one program here uses more memory than this. */
+  memoryAlerts: MemoryAlerts;
+  /** Where developer mode looks for projects. With none, the usual places. */
+  devFolders: string[];
+}
+
+export interface MemoryAlerts {
+  enabled: boolean;
+  /** In megabytes of 1024 kilobytes, as Windows counts them. */
+  limitMb: number;
 }
 
 /** Whether this PC is set up to work at the lock screen. */
@@ -164,6 +176,10 @@ export interface DeviceView {
   screensAllowed: boolean;
   /** It has just been looking at them. */
   watchingScreens: boolean;
+  /** It can use developer mode on this PC. */
+  developerAllowed: boolean;
+  /** Connected, and running a version with developer mode. */
+  hasDeveloperMode: boolean;
 }
 
 export interface ScreenView {
@@ -253,4 +269,173 @@ export interface UiState {
   savedLayouts: number;
   /** Other programs running here that share the keyboard and mouse too. */
   rivalPrograms: string[];
+  /** The latest things to tell the user about developer mode, oldest first. */
+  devNotices: DevNotice[];
+}
+
+// Developer mode. These match hk_core::dev.
+
+export interface DevNotice {
+  id: number;
+  title: string;
+  text: string;
+}
+
+/** A process. Its start time is text, being too large for a number here to hold exactly. */
+export interface ProgramId {
+  pid: number;
+  started: string;
+}
+
+export type ContainerAction = "stop" | "restart" | "start";
+
+export type DevRequest =
+  | "programs"
+  | { stop: { program: ProgramId } }
+  | "stopBuildHelpers"
+  | "versions"
+  | "docker"
+  | { dockerContainer: { id: string; action: ContainerAction } }
+  | "stopAllContainers"
+  | "disk"
+  | { clean: { items: CleanItem[] } }
+  | "compactDockerDisk";
+
+export type DevReply =
+  | { programs: ProgramsReport }
+  | { done: { summary: string } }
+  | { versions: { tools: ToolVersion[] } }
+  | { docker: DockerReport }
+  | { disk: DiskReport }
+  | { cleaned: { results: CleanResult[] } }
+  | { refused: { reason: string } };
+
+export type ProgramKind =
+  | "nextJs"
+  | "vite"
+  | "webDevServer"
+  | "node"
+  | "dotNet"
+  | "rust"
+  | "docker"
+  | "buildHelper"
+  | "editorHelper"
+  | "packageManager"
+  | "other";
+
+export interface Program {
+  id: ProgramId;
+  kind: ProgramKind;
+  name: string;
+  project: string | null;
+  /** In bytes, all its processes together. */
+  memory: number;
+  processes: number;
+  canStop: boolean;
+}
+
+export interface PortUse {
+  port: number;
+  address: string;
+  program: ProgramId | null;
+  name: string;
+  canStop: boolean;
+  /** The Docker container it's for, which is what to stop rather than Docker itself. */
+  container: string | null;
+}
+
+export interface ProgramsReport {
+  programs: Program[];
+  buildHelpers: Program[];
+  ports: PortUse[];
+  memoryTotal: number;
+  memoryUsed: number;
+}
+
+export interface ToolVersion {
+  tool: string;
+  version: string | null;
+}
+
+export interface Container {
+  id: string;
+  name: string;
+  image: string;
+  running: boolean;
+  status: string;
+  memory: number | null;
+  cpu: number | null;
+}
+
+export type DockerClean =
+  | "buildCache"
+  | "danglingImages"
+  | "unusedImages"
+  | "stoppedContainers"
+  | "unusedVolumes";
+
+export interface DockerUsage {
+  kind: DockerClean;
+  size: number;
+  reclaimable: number;
+}
+
+export interface DiskImage {
+  path: string;
+  size: number;
+}
+
+export interface DockerReport {
+  running: boolean;
+  installed: boolean;
+  containers: Container[];
+  usage: DockerUsage[];
+  diskImage: DiskImage | null;
+}
+
+export interface Drive {
+  name: string;
+  total: number;
+  free: number;
+}
+
+export type FolderKind = "nodeModules" | "rustTarget" | "dotNetBuild" | "nextBuild";
+
+export interface DevFolder {
+  path: string;
+  kind: FolderKind;
+  project: string;
+  size: number;
+  /** In milliseconds since 1970. */
+  lastUsed: number | null;
+  inUse: boolean;
+  /** Shares its files with a store elsewhere, as pnpm does, so deleting it frees less. */
+  sharedFiles: boolean;
+}
+
+export type CacheKind = "npm" | "pnpmStore" | "nuGetPackages" | "nuGetHttp" | "cargoRegistry";
+
+export interface Cache {
+  kind: CacheKind;
+  path: string;
+  size: number;
+}
+
+export interface DiskReport {
+  drives: Drive[];
+  folders: DevFolder[];
+  caches: Cache[];
+  roots: string[];
+  dockerImage: DiskImage | null;
+}
+
+export type CleanItem =
+  | { folder: { path: string } }
+  | { cache: { kind: CacheKind } }
+  | { docker: { kind: DockerClean } };
+
+export interface CleanResult {
+  item: CleanItem;
+  freed: number;
+  problem: string | null;
 }

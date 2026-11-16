@@ -3,6 +3,35 @@
 Downloads are on the [releases page](https://github.com/medAmarFilali/hackerman/releases).
 Versions before 0.10.0 weren't published.
 
+## 0.12.0
+
+### Added
+
+- **Developer mode**, off until turned on in **Settings > Developer**. A **Developer** button
+  shows, for this computer or another one that allows it:
+  - the programs using the most memory, each with everything it started, such as a Next.js dev
+    server with its project's name, with a button to stop it
+  - build helpers left running after a build, to stop them all
+  - the ports in use and what holds each one, to free a port
+  - Docker's containers, to start, stop or restart them, and the size of Docker's disk file, with a
+    way to shrink it
+  - each drive's free space, and the build folders (`node_modules`, `target`, `bin` and `obj`,
+    `.next`) and package caches taking space
+  - the versions of Node.js, npm, pnpm, .NET, Rust, Docker and Git installed
+- **Cleaning up** build folders, package caches and Docker's data, after a warning to read. What
+  can lose data, like Docker volumes, is hidden until asked for and needs **DELETE** typed.
+  Projects changed lately, and anything a running program is using, are left out.
+- **Memory alerts**, off until turned on: a notification when one program uses more memory than
+  the amount chosen.
+- Each computer chooses which others can use developer mode on it, none at first, and is told
+  afterwards what they did.
+
+### Known limits
+
+- Developer mode works on Windows only.
+- Shrinking Docker's disk file, and cleaning up on another computer, have had very little use on
+  real computers so far.
+
 ## 0.11.0
 
 ### Added

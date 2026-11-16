@@ -23,8 +23,10 @@ function device(fingerprint: string, status: DeviceStatus = "connected") {
     needsUpdateForFiles: false,
     canReceiveFiles: true,
     filesAllowed: false,
-  screensAllowed: false,
-  watchingScreens: false,
+    screensAllowed: false,
+    watchingScreens: false,
+    developerAllowed: false,
+    hasDeveloperMode: true,
   };
 }
 
@@ -54,6 +56,8 @@ function stateWith(change: Partial<UiState> = {}): UiState {
         back: { ctrl: true, alt: true, shift: false, meta: false, key: "PageUp" },
         forward: { ctrl: true, alt: true, shift: false, meta: false, key: "PageDown" },
       },
+      memoryAlerts: { enabled: false, limitMb: 4096 },
+      devFolders: [],
     },
     enabled: true,
     locked: false,
@@ -65,6 +69,7 @@ function stateWith(change: Partial<UiState> = {}): UiState {
     layoutSaved: true,
     savedLayouts: 1,
     rivalPrograms: [],
+    devNotices: [],
     ...change,
   };
 }

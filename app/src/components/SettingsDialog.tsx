@@ -11,6 +11,7 @@ import {
   Palette,
   Paperclip,
   Settings,
+  Wrench,
   X,
   type LucideIcon,
 } from "lucide-react";
@@ -102,6 +103,7 @@ type SectionId =
   | "screens"
   | "appearance"
   | "shortcuts"
+  | "developer"
   | "about";
 
 const SECTIONS: { id: SectionId; label: string; icon: LucideIcon }[] = [
@@ -112,6 +114,7 @@ const SECTIONS: { id: SectionId; label: string; icon: LucideIcon }[] = [
   { id: "screens", label: "Screens", icon: Eye },
   { id: "appearance", label: "Appearance", icon: Palette },
   { id: "shortcuts", label: "Shortcuts", icon: Keyboard },
+  { id: "developer", label: "Developer", icon: Wrench },
   { id: "about", label: "About", icon: Info },
 ];
 
@@ -173,6 +176,7 @@ export function SettingsDialog({ state }: { state: UiState }) {
                 {section === "screens" && <Screens state={state} />}
                 {section === "appearance" && <Appearance />}
                 {section === "shortcuts" && <Shortcuts state={state} update={update} />}
+                {section === "developer" && <Developer state={state} update={update} />}
                 {section === "about" && <About state={state} />}
               </div>
             </ScrollArea>
@@ -659,6 +663,121 @@ function ScreenPermission({ device }: { device: UiState["devices"][number] }) {
         checked={device.screensAllowed}
         onCheckedChange={(allowed) =>
           send({ type: "setScreensAllowed", device: device.fingerprint, allowed })
+        }
+        className="data-checked:bg-signal"
+      />
+    </div>
+  );
+}
+
+const MEMORY_LIMITS = [1, 2, 4, 8, 16].map((gigabytes) => ({
+  value: String(gigabytes * 1024),
+  label: `${gigabytes} GB`,
+}));
+
+function Developer({
+  state,
+  update,
+}: {
+  state: UiState;
+  update: (change: Partial<Rules>) => void;
+}) {
+  const { developerMode } = useAppearance();
+  const { memoryAlerts, devFolders } = state.rules;
+  const paired = state.devices.filter((device) => device.status !== "available");
+  const limits = MEMORY_LIMITS.some((limit) => limit.value === String(memoryAlerts.limitMb))
+    ? MEMORY_LIMITS
+    : [...MEMORY_LIMITS, { value: String(memoryAlerts.limitMb), label: `${memoryAlerts.limitMb} MB` }];
+
+  async function addFolder() {
+    const chosen = await chooseFolder({ directory: true, title: "A folder with projects in it" });
+    if (typeof chosen === "string" && !devFolders.includes(chosen)) {
+      update({ devFolders: [...devFolders, chosen] });
+    }
+  }
+
+  return (
+    <>
+      <SwitchRow
+        label="Developer mode"
+        description="Adds a Developer button at the top of the window: what's using memory and ports on each PC, Docker, installed versions, and cleaning up after builds."
+        checked={developerMode}
+        onChange={(on) => changeAppearance({ developerMode: on })}
+      />
+      <SwitchRow
+        label="Memory alerts"
+        description="A notification when one program on this PC, with everything it started, uses more memory than the amount below. PCs allowed to use developer mode here are told too."
+        checked={memoryAlerts.enabled}
+        onChange={(enabled) => update({ memoryAlerts: { ...memoryAlerts, enabled } })}
+      />
+      <SelectRow
+        label="Alert above"
+        description="For one program. A Next.js dev server usually stays under 2 GB."
+        value={String(memoryAlerts.limitMb)}
+        options={limits}
+        onChange={(value) => update({ memoryAlerts: { ...memoryAlerts, limitMb: Number(value) } })}
+      />
+      <div className="flex flex-col gap-2">
+        <div className="flex items-start justify-between gap-6">
+          <div className="flex min-w-0 flex-col gap-0.5">
+            <span className="text-sm font-medium">Folders with projects</span>
+            <span className="text-xs text-muted-foreground">
+              {devFolders.length === 0
+                ? "None chosen, so Hackerman looks in the usual places in your own folder, like source\\repos and Documents\\code. Only these are ever cleaned up."
+                : "Hackerman looks for projects' build folders in these, and only ever cleans up inside them."}
+            </span>
+          </div>
+          <Button size="sm" variant="secondary" onClick={() => void addFolder()}>
+            <FolderOpen />
+            Add a folder
+          </Button>
+        </div>
+        {devFolders.map((folder) => (
+          <div key={folder} className="flex items-center justify-between gap-3 rounded-md border px-2.5 py-1.5">
+            <span title={folder} className="min-w-0 truncate text-xs">
+              {folder}
+            </span>
+            <Button
+              size="icon-xs"
+              variant="ghost"
+              aria-label={`Stop looking in ${folder}`}
+              onClick={() => update({ devFolders: devFolders.filter((other) => other !== folder) })}
+            >
+              <X />
+            </Button>
+          </div>
+        ))}
+      </div>
+      <div className="flex flex-col gap-2">
+        <div className="flex flex-col gap-0.5">
+          <span className="text-sm font-medium">PCs that can use developer mode on this PC</span>
+          <span className="text-xs text-muted-foreground">
+            {paired.length === 0
+              ? "Pair with another PC first."
+              : "They can see every program running here and its memory, the ports in use and what's on this PC's disk, stop programs and Docker containers, and delete build folders, caches and Docker's data, without asking. You're told afterwards. Only allow PCs whose users you trust with all of that."}
+          </span>
+        </div>
+        {paired.map((device) => (
+          <DeveloperPermission key={device.fingerprint} device={device} />
+        ))}
+      </div>
+    </>
+  );
+}
+
+function DeveloperPermission({ device }: { device: UiState["devices"][number] }) {
+  const id = useId();
+  return (
+    <div className="flex items-center justify-between gap-3 rounded-md border px-2.5 py-1.5">
+      <Label htmlFor={id} title={device.name} className="min-w-0 truncate text-xs font-medium">
+        {device.name}
+      </Label>
+      <Switch
+        id={id}
+        aria-label={`Let ${device.name} use developer mode on this PC`}
+        checked={device.developerAllowed}
+        onCheckedChange={(allowed) =>
+          send({ type: "setDeveloperAllowed", device: device.fingerprint, allowed })
         }
         className="data-checked:bg-signal"
       />

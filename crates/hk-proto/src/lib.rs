@@ -4,6 +4,7 @@
 
 use hk_core::apps::{AppAction, MediaCommand, RunningApp};
 use hk_core::clipboard::{ClipVersion, ClipboardData, SharedFile};
+use hk_core::dev::{DevReply, DevRequest, MemoryAlert};
 use hk_core::input::InputEvent;
 use hk_core::layout::{LayoutDoc, Monitor};
 use hk_core::shared_monitors::{MonitorIdentity, Showing};
@@ -46,6 +47,10 @@ pub const FEATURE_APP_ACTIONS: u32 = 1 << 5;
 /// Knows when a monitor is plugged into more than one device, and which one it's showing.
 pub const FEATURE_SHARED_MONITORS: u32 = 1 << 6;
 
+/// Developer mode: can be asked what's using its memory, ports, disk and Docker, and to stop
+/// programs and clean up, if its user allows the device asking.
+pub const FEATURE_DEVELOPER: u32 = 1 << 7;
+
 /// Everything this version can do beyond the base protocol, for [`Message::Hello`].
 pub const FEATURES: u32 = FEATURE_FILES
     | FEATURE_SEND_FILES
@@ -53,7 +58,8 @@ pub const FEATURES: u32 = FEATURE_FILES
     | FEATURE_MEDIA
     | FEATURE_SCREENS
     | FEATURE_APP_ACTIONS
-    | FEATURE_SHARED_MONITORS;
+    | FEATURE_SHARED_MONITORS
+    | FEATURE_DEVELOPER;
 
 /// A message sent from one peer to another.
 ///
@@ -105,11 +111,20 @@ pub enum Message {
     /// A picture of one of those apps, as a PNG. These go separately and only once each, so
     /// that a window moving to another screen doesn't send them all again. Needs
     /// [`FEATURE_APPS`].
-    AppIcon { app: String, png: Vec<u8> },
+    AppIcon {
+        app: String,
+        png: Vec<u8>,
+    },
     /// Asks the receiver to do this with an app. Needs [`FEATURE_MEDIA`].
-    Media { app: String, command: MediaCommand },
+    Media {
+        app: String,
+        command: MediaCommand,
+    },
     /// Asks the receiver to do this with an app's windows. Needs [`FEATURE_APP_ACTIONS`].
-    AppAction { app: String, action: AppAction },
+    AppAction {
+        app: String,
+        action: AppAction,
+    },
     /// What the sender's monitors say they are, for the ones that give a serial number, so
     /// that one plugged into several devices is seen to be one monitor. Sent after `Hello`
     /// and with every [`Message::Monitors`]. Needs [`FEATURE_SHARED_MONITORS`].
@@ -117,6 +132,19 @@ pub enum Message {
     /// Which device each of those monitors is showing, as far as the sender knows. Needs
     /// [`FEATURE_SHARED_MONITORS`].
     Showing(Showing),
+    /// Developer mode: asks the receiver about itself, or to do something. The answer comes back
+    /// as a [`Message::DevReply`] with the same ID. Needs [`FEATURE_DEVELOPER`].
+    DevRequest {
+        id: u64,
+        request: DevRequest,
+    },
+    DevReply {
+        id: u64,
+        reply: DevReply,
+    },
+    /// A program on the sender is using more memory than its user said is too much. Needs
+    /// [`FEATURE_DEVELOPER`].
+    MemoryAlert(MemoryAlert),
 }
 
 /// See [`Message::Transfer`].
@@ -446,6 +474,117 @@ mod tests {
             };
             assert_eq!(decode(&encode(&message).unwrap()).unwrap(), message);
         }
+    }
+
+    #[test]
+    fn developer_requests_and_replies_round_trip() {
+        use hk_core::dev::*;
+
+        let program = ProgramId {
+            pid: 4242,
+            started: 133_000_000_000_000_000,
+        };
+        let requests = [
+            DevRequest::Programs,
+            DevRequest::Stop { program },
+            DevRequest::StopBuildHelpers,
+            DevRequest::Versions,
+            DevRequest::Docker,
+            DevRequest::DockerContainer {
+                id: "3f2a".into(),
+                action: ContainerAction::Restart,
+            },
+            DevRequest::StopAllContainers,
+            DevRequest::Disk,
+            DevRequest::Clean {
+                items: vec![
+                    CleanItem::Folder {
+                        path: r"C:\code\site\node_modules".into(),
+                    },
+                    CleanItem::Cache {
+                        kind: CacheKind::PnpmStore,
+                    },
+                    CleanItem::Docker {
+                        kind: DockerClean::UnusedVolumes,
+                    },
+                ],
+            },
+            DevRequest::CompactDockerDisk,
+        ];
+        for (id, request) in requests.into_iter().enumerate() {
+            let message = Message::DevRequest {
+                id: id as u64,
+                request,
+            };
+            assert_eq!(decode(&encode(&message).unwrap()).unwrap(), message);
+        }
+
+        let replies = [
+            DevReply::Programs(ProgramsReport {
+                programs: vec![Program {
+                    id: program,
+                    kind: ProgramKind::NextJs,
+                    name: "Next.js".into(),
+                    project: Some("site".into()),
+                    memory: 1_860_000_000,
+                    processes: 3,
+                    can_stop: true,
+                }],
+                build_helpers: vec![],
+                ports: vec![PortUse {
+                    port: 5432,
+                    address: "0.0.0.0".into(),
+                    program: None,
+                    name: "postgres (Docker)".into(),
+                    can_stop: false,
+                    container: Some("postgres".into()),
+                }],
+                memory_total: 32_000_000_000,
+                memory_used: 20_000_000_000,
+            }),
+            DevReply::Docker(DockerReport {
+                running: true,
+                installed: true,
+                containers: vec![Container {
+                    id: "3f2a".into(),
+                    name: "db".into(),
+                    image: "postgres:16".into(),
+                    running: true,
+                    status: "Up 2 hours".into(),
+                    memory: Some(80_000_000),
+                    cpu: Some(0.5),
+                }],
+                usage: vec![DockerUsage {
+                    kind: DockerClean::BuildCache,
+                    size: 2_000_000_000,
+                    reclaimable: 2_000_000_000,
+                }],
+                disk_image: None,
+            }),
+            DevReply::Cleaned {
+                results: vec![CleanResult {
+                    item: CleanItem::Cache {
+                        kind: CacheKind::Npm,
+                    },
+                    freed: 5_000_000_000,
+                    problem: None,
+                }],
+            },
+            DevReply::Refused {
+                reason: "not allowed".into(),
+            },
+        ];
+        for reply in replies {
+            let message = Message::DevReply { id: 7, reply };
+            assert_eq!(decode(&encode(&message).unwrap()).unwrap(), message);
+        }
+        let alert = Message::MemoryAlert(MemoryAlert {
+            name: "Next.js".into(),
+            project: Some("site".into()),
+            memory: 5_000_000_000,
+            limit: 4_000_000_000,
+        });
+        assert_eq!(decode(&encode(&alert).unwrap()).unwrap(), alert);
     }
 
     #[test]

@@ -6,7 +6,7 @@
 //! The one exception is input, which is too time-critical to pass through here;
 //! see [`crate::shared`].
 
-use std::collections::{BTreeMap, HashSet, VecDeque};
+use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::path::PathBuf;
 use std::sync::{Arc, PoisonError};
@@ -16,6 +16,7 @@ use anyhow::{Context, Result};
 use base64::Engine as _;
 use hk_core::apps::{self, AppAction, MAX_ICON_BYTES, MAX_ICONS, MediaCommand, RunningApp};
 use hk_core::clipboard::{ClipVersion, ClipboardData, MAX_SHARED_FILES, SharedFile};
+use hk_core::dev::{DevReply, DevRequest, MemoryAlert, MemoryWatch, Program};
 use hk_core::device::Fingerprint;
 use hk_core::layout::{DeviceMonitors, LayoutDoc, Monitor, Placement, Topology};
 use hk_core::rules::ReceiveFiles;
@@ -25,9 +26,10 @@ use hk_core::shared_monitors::{
 };
 use hk_core::switcher::Switcher;
 use hk_ipc::{
-    AppView, ControlView, DeviceStatus, DeviceView, FromAgent, IncomingFilesView, IpcConnection,
-    IpcListener, PairingStage, PairingView, PictureAnswer, Request, ScreenAsk, ScreenPicture,
-    ScreenView, SharedScreen, ThisDevice, TransferStage, TransferView, UiState,
+    AppView, ControlView, DevAnswer, DevNotice, DeviceStatus, DeviceView, FromAgent,
+    IncomingFilesView, IpcConnection, IpcListener, PairingStage, PairingView, PictureAnswer,
+    Request, ScreenAsk, ScreenPicture, ScreenView, SharedScreen, ThisDevice, TransferStage,
+    TransferView, UiState,
 };
 use hk_net::{
     Accepted, BlobChannel, DataWriter, Discovery, DiscoveryEvent, Endpoint, FoundDevice, Identity,
@@ -35,8 +37,8 @@ use hk_net::{
 };
 use hk_platform::{Capture, FileSource, Platform};
 use hk_proto::{
-    ClipboardBlob, FEATURE_APP_ACTIONS, FEATURE_APPS, FEATURE_FILES, FEATURE_MEDIA,
-    FEATURE_SCREENS, FEATURE_SEND_FILES, FEATURE_SHARED_MONITORS, FEATURES, Message,
+    ClipboardBlob, FEATURE_APP_ACTIONS, FEATURE_APPS, FEATURE_DEVELOPER, FEATURE_FILES,
+    FEATURE_MEDIA, FEATURE_SCREENS, FEATURE_SEND_FILES, FEATURE_SHARED_MONITORS, FEATURES, Message,
     PROTOCOL_VERSION, ScreenAnswer, ScreenRequest, TransferUpdate,
 };
 use tokio::runtime::Handle;
@@ -46,6 +48,7 @@ use tokio::task::{JoinHandle, JoinSet};
 
 use crate::clipboard::ClipboardSync;
 use crate::config::{self, PairedDevice, Settings};
+use crate::dev;
 use crate::files::{
     self, Links, LocalFiles, OfferedFiles, RemoteFiles, SaveError, TransferControl,
 };
@@ -94,6 +97,24 @@ const MEDIA_SETTLES: Duration = Duration::from_millis(300);
 /// A device that asked for a picture this recently counts as looking at this one's screens. It's
 /// long enough for pictures that come a few seconds apart.
 const WATCHING_FOR: Duration = Duration::from_secs(10);
+/// How long to wait for another device to answer in developer mode. Cleaning up can take minutes.
+const DEV_GIVE_UP: Duration = Duration::from_secs(20 * 60);
+/// How often to look at what's using memory, while memory alerts are on.
+const CHECK_MEMORY_EVERY_N_TICKS: u64 = 15;
+/// How many things to tell the user about developer mode are kept.
+const MAX_NOTICES: usize = 20;
+
+fn answer_app(app: &UnboundedSender<FromAgent>, id: u64, reply: DevReply) {
+    let _ = app.send(FromAgent::Dev(DevAnswer { id, reply }));
+}
+
+/// A developer mode request sent to another device, and the app waiting for its answer.
+struct DevWaiting {
+    peer: Fingerprint,
+    app_id: u64,
+    reply: UnboundedSender<FromAgent>,
+    since: Instant,
+}
 
 pub struct Options {
     /// Where to keep settings, the identity and saved data.
@@ -127,6 +148,40 @@ pub enum Event {
         request: ScreenRequest,
         writer: DataWriter,
     },
+    /// The app asks a device, which may be this one, something for developer mode.
+    DevAsked {
+        id: u64,
+        device: Fingerprint,
+        request: DevRequest,
+        reply: UnboundedSender<FromAgent>,
+    },
+    /// Another device asks this one something for developer mode.
+    PeerDevRequest {
+        peer: Fingerprint,
+        id: u64,
+        request: DevRequest,
+    },
+    /// The answer to something asked of another device.
+    PeerDevReply {
+        peer: Fingerprint,
+        id: u64,
+        reply: DevReply,
+    },
+    PeerMemoryAlert {
+        peer: Fingerprint,
+        alert: MemoryAlert,
+    },
+    /// Something to tell the user about developer mode.
+    DevNotice {
+        title: String,
+        text: String,
+    },
+    /// A request from another device has been answered.
+    PeerDevFinished {
+        peer: Fingerprint,
+    },
+    /// What's using memory here now, for the memory alerts.
+    MemoryChecked(Vec<Program>),
     Discovery(DiscoveryEvent),
     Incoming(Box<Accepted>),
     Dialed {
@@ -394,6 +449,15 @@ struct Engine<P: Platform> {
     picture_limits: screens::Limits,
     /// Which devices have been asking for pictures of the screens here, and when they last did.
     watchers: BTreeMap<Fingerprint, Instant>,
+    /// Developer mode requests sent to other devices, by the ID they went with.
+    dev_waiting: HashMap<u64, DevWaiting>,
+    next_dev_id: u64,
+    /// How many requests from each device are being answered here right now.
+    dev_answering: HashMap<Fingerprint, usize>,
+    dev_notices: VecDeque<DevNotice>,
+    next_notice: u64,
+    memory_watch: MemoryWatch,
+    checking_memory: bool,
     // These keep input capture and clipboard watching running.
     capture: Option<Capture>,
     _clipboard_watcher: Option<Capture>,
@@ -545,6 +609,13 @@ pub async fn run<P: Platform>(options: Options, platform: P) -> Result<()> {
         rivals: Vec::new(),
         picture_limits: screens::Limits::new(),
         watchers: BTreeMap::new(),
+        dev_waiting: HashMap::new(),
+        next_dev_id: 0,
+        dev_answering: HashMap::new(),
+        dev_notices: VecDeque::new(),
+        next_notice: 0,
+        memory_watch: MemoryWatch::default(),
+        checking_memory: false,
         capture,
         _clipboard_watcher: clipboard_watcher,
     };
@@ -652,6 +723,16 @@ async fn serve_app(mut connection: IpcConnection, events: UnboundedSender<Event>
                             ask,
                             reply: to_app_tx.clone(),
                         },
+                        Request::Dev {
+                            id,
+                            device,
+                            request,
+                        } => Event::DevAsked {
+                            id,
+                            device,
+                            request,
+                            reply: to_app_tx.clone(),
+                        },
                         request => Event::AppRequest(request),
                     };
                     if events.send(event).is_err() {
@@ -756,6 +837,8 @@ impl<P: Platform> Engine<P> {
         }
         self.read_apps();
         self.forget_old_watchers();
+        self.give_up_on_dev_requests();
+        self.check_memory();
         let monitors = self.shared.platform.monitors();
         if monitors != self.monitors {
             tracing::info!(count = monitors.len(), "monitors changed");
@@ -898,6 +981,27 @@ impl<P: Platform> Engine<P> {
                 self.on_peer_monitor_identities(peer, identities);
             }
             Event::PeerShowing { showing } => self.on_peer_showing(showing),
+            Event::DevAsked {
+                id,
+                device,
+                request,
+                reply,
+            } => self.on_dev_asked(id, device, request, reply),
+            Event::PeerDevRequest { peer, id, request } => {
+                self.on_peer_dev_request(peer, id, request);
+            }
+            Event::PeerDevReply { peer, id, reply } => self.on_peer_dev_reply(peer, id, reply),
+            Event::PeerMemoryAlert { peer, alert } => {
+                let title = format!("Memory on {}", self.device_name(peer));
+                self.add_notice(title, dev::alert_text(&alert));
+            }
+            Event::DevNotice { title, text } => self.add_notice(title, text),
+            Event::PeerDevFinished { peer } => {
+                if let Some(answering) = self.dev_answering.get_mut(&peer) {
+                    *answering = answering.saturating_sub(1);
+                }
+            }
+            Event::MemoryChecked(programs) => self.on_memory_checked(&programs),
             Event::MediaRequested { peer, app, command } => {
                 self.on_media_requested(peer, app, command);
             }
@@ -993,9 +1097,12 @@ impl<P: Platform> Engine<P> {
             Request::SetScreensAllowed { device, allowed } => {
                 self.set_screens_allowed(device, allowed);
             }
-            // Handled on the way here, to say where the answer goes.
             Request::ShowOnMonitor { hardware, device } => self.show_on_monitor(&hardware, device),
-            Request::ScreenPicture { .. } => {}
+            Request::SetDeveloperAllowed { device, allowed } => {
+                self.set_developer_allowed(device, allowed);
+            }
+            // Handled on the way here, to say where the answer goes.
+            Request::ScreenPicture { .. } | Request::Dev { .. } => {}
             Request::Shutdown => {} // Handled by the main loop.
         }
     }
@@ -1084,6 +1191,9 @@ impl<P: Platform> Engine<P> {
         self.check_fullscreen();
         self.tell_peers_about_apps();
         self.read_apps();
+        // Straight away, rather than at the next regular look.
+        self.memory_watch = MemoryWatch::default();
+        self.start_memory_check();
         self.notify();
     }
 
@@ -1408,6 +1518,246 @@ impl<P: Platform> Engine<P> {
                 tracing::debug!(%error, "sending a picture ended early");
             }
         });
+    }
+
+    // Developer mode
+
+    fn device_name(&self, device: Fingerprint) -> String {
+        self.paired
+            .get(&device)
+            .map_or_else(|| "Another PC".to_string(), |paired| paired.name.clone())
+    }
+
+    /// Where to look for projects. None means the usual places.
+    fn dev_folders(&self) -> Vec<PathBuf> {
+        self.settings
+            .rules
+            .dev_folders
+            .iter()
+            .map(PathBuf::from)
+            .collect()
+    }
+
+    /// Asks this computer, or another, for what the app wants. The answer goes back to that
+    /// app only.
+    fn on_dev_asked(
+        &mut self,
+        id: u64,
+        device: Fingerprint,
+        request: DevRequest,
+        reply: UnboundedSender<FromAgent>,
+    ) {
+        if device == self.me {
+            if request.acts() {
+                tracing::info!(?request, "asked for something in developer mode");
+            }
+            let platform = self.shared.platform.clone();
+            let folders = self.dev_folders();
+            tokio::spawn(async move {
+                let dev_reply =
+                    tokio::task::spawn_blocking(move || platform.developer(&request, &folders))
+                        .await
+                        .unwrap_or_else(|_| DevReply::Refused {
+                            reason: "it went wrong".into(),
+                        });
+                answer_app(&reply, id, dev_reply);
+            });
+            return;
+        }
+        let name = self.device_name(device);
+        let refuse = |reason: String| answer_app(&reply, id, DevReply::Refused { reason });
+        let Some(session) = self.sessions.get(&device).filter(|session| session.up) else {
+            return refuse(format!("{name} isn't connected"));
+        };
+        if session.features & FEATURE_DEVELOPER == 0 {
+            return refuse(format!("{name} needs Hackerman 0.12.0 or newer for this"));
+        }
+        let wire_id = self.next_dev_id;
+        self.next_dev_id += 1;
+        let message = Message::DevRequest {
+            id: wire_id,
+            request,
+        };
+        if session.outgoing.send(message).is_err() {
+            return refuse(format!("{name} isn't connected"));
+        }
+        self.dev_waiting.insert(
+            wire_id,
+            DevWaiting {
+                peer: device,
+                app_id: id,
+                reply,
+                since: Instant::now(),
+            },
+        );
+    }
+
+    fn on_peer_dev_reply(&mut self, peer: Fingerprint, id: u64, reply: DevReply) {
+        if self
+            .dev_waiting
+            .get(&id)
+            .is_some_and(|waiting| waiting.peer == peer)
+            && let Some(waiting) = self.dev_waiting.remove(&id)
+        {
+            answer_app(&waiting.reply, waiting.app_id, dev::sanitized(reply));
+        }
+    }
+
+    /// Answers all the requests waiting that `which` picks with this reason.
+    fn fail_dev_requests(&mut self, which: impl Fn(&DevWaiting) -> bool, reason: &str) {
+        let failed: Vec<u64> = self
+            .dev_waiting
+            .iter()
+            .filter(|(_, waiting)| which(waiting))
+            .map(|(id, _)| *id)
+            .collect();
+        for id in failed {
+            if let Some(waiting) = self.dev_waiting.remove(&id) {
+                let reason = reason.to_string();
+                answer_app(&waiting.reply, waiting.app_id, DevReply::Refused { reason });
+            }
+        }
+    }
+
+    fn give_up_on_dev_requests(&mut self) {
+        self.fail_dev_requests(
+            |waiting| waiting.since.elapsed() > DEV_GIVE_UP,
+            "it didn't answer in time",
+        );
+    }
+
+    /// Another device asks something of this one. It only gets an answer if the user here said
+    /// it can, and the user is told of anything it did.
+    fn on_peer_dev_request(&mut self, peer: Fingerprint, id: u64, request: DevRequest) {
+        let Some(session) = self.sessions.get(&peer).filter(|session| session.up) else {
+            return;
+        };
+        let outgoing = session.outgoing.clone();
+        let refuse = |reason: String| {
+            let _ = outgoing.send(Message::DevReply {
+                id,
+                reply: DevReply::Refused { reason },
+            });
+        };
+        let (here, there) = (self.settings.name.clone(), self.device_name(peer));
+        if !self
+            .paired
+            .get(&peer)
+            .is_some_and(|paired| paired.developer_allowed)
+        {
+            return refuse(format!(
+                "{here} hasn't allowed {there} to use developer mode on it. That's in Hackerman's \
+                 Settings, under Developer, on {here}."
+            ));
+        }
+        if !self.settings.enabled {
+            return refuse(format!("{here} has sharing turned off"));
+        }
+        let answering = self.dev_answering.entry(peer).or_default();
+        if *answering >= dev::MAX_AT_ONCE {
+            return refuse(format!("{here} is still busy with what was asked before"));
+        }
+        *answering += 1;
+        tracing::info!(%peer, ?request, "another device asked for something in developer mode");
+
+        let platform = self.shared.platform.clone();
+        let folders = self.dev_folders();
+        let events = self.events.clone();
+        let acts = request.acts();
+        tokio::spawn(async move {
+            let reply = tokio::task::spawn_blocking(move || platform.developer(&request, &folders))
+                .await
+                .unwrap_or_else(|_| DevReply::Refused {
+                    reason: "it went wrong".into(),
+                });
+            if acts && let Some(text) = dev::notice_text(&reply) {
+                let _ = events.send(Event::DevNotice {
+                    title: format!("{there} used developer mode here"),
+                    text,
+                });
+            }
+            let _ = outgoing.send(Message::DevReply { id, reply });
+            let _ = events.send(Event::PeerDevFinished { peer });
+        });
+    }
+
+    fn add_notice(&mut self, title: String, text: String) {
+        self.next_notice += 1;
+        self.dev_notices.push_back(DevNotice {
+            id: self.next_notice,
+            title,
+            text,
+        });
+        while self.dev_notices.len() > MAX_NOTICES {
+            self.dev_notices.pop_front();
+        }
+        self.notify();
+    }
+
+    /// Looks at what's using memory here every so often, while memory alerts are on.
+    fn check_memory(&mut self) {
+        if self.ticks.is_multiple_of(CHECK_MEMORY_EVERY_N_TICKS) {
+            self.start_memory_check();
+        }
+    }
+
+    fn start_memory_check(&mut self) {
+        if !self.settings.rules.memory_alerts.enabled || self.checking_memory {
+            return;
+        }
+        self.checking_memory = true;
+        let platform = self.shared.platform.clone();
+        let events = self.events.clone();
+        tokio::spawn(async move {
+            let reply =
+                tokio::task::spawn_blocking(move || platform.developer(&DevRequest::Programs, &[]))
+                    .await;
+            let programs = match reply {
+                Ok(DevReply::Programs(report)) => report.programs,
+                _ => Vec::new(),
+            };
+            let _ = events.send(Event::MemoryChecked(programs));
+        });
+    }
+
+    /// Says so for each program newly over the limit, here and on the devices allowed to see
+    /// what's running here.
+    fn on_memory_checked(&mut self, programs: &[Program]) {
+        self.checking_memory = false;
+        let alerts = self.settings.rules.memory_alerts;
+        if !alerts.enabled {
+            return;
+        }
+        let limit = u64::from(alerts.limit_mb) * 1024 * 1024;
+        for alert in self.memory_watch.check(programs, limit) {
+            tracing::info!(
+                name = alert.name,
+                memory = alert.memory,
+                "a program is using a lot of memory"
+            );
+            let allowed = self.sessions.iter().filter(|(peer, session)| {
+                session.up
+                    && session.features & FEATURE_DEVELOPER != 0
+                    && self
+                        .paired
+                        .get(peer)
+                        .is_some_and(|paired| paired.developer_allowed)
+            });
+            for (_, session) in allowed {
+                let _ = session.outgoing.send(Message::MemoryAlert(alert.clone()));
+            }
+            self.add_notice("Memory alert".into(), dev::alert_text(&alert));
+        }
+    }
+
+    fn set_developer_allowed(&mut self, device: Fingerprint, allowed: bool) {
+        let Some(paired) = self.paired.get_mut(&device) else {
+            return;
+        };
+        paired.developer_allowed = allowed;
+        self.save_devices();
+        tracing::info!(%device, allowed, "changed who can use developer mode on this computer");
+        self.notify();
     }
 
     fn set_screens_allowed(&mut self, device: Fingerprint, allowed: bool) {
@@ -2364,6 +2714,11 @@ impl<P: Platform> Engine<P> {
     /// Closes the connection to `device`, if there is one. Dropping every sender
     /// for its queue ends the session task, which tidies up after itself.
     fn end_session(&mut self, device: Fingerprint) {
+        let name = self.device_name(device);
+        self.fail_dev_requests(
+            |waiting| waiting.peer == device,
+            &format!("{name} disconnected"),
+        );
         self.sessions.remove(&device);
         self.peers_off.remove(&device);
         self.clipboard.device_gone(device);
@@ -2655,6 +3010,7 @@ impl<P: Platform> Engine<P> {
                         files_allowed: false,
                         screens_allowed: false,
                         monitor_identities: Vec::new(),
+                        developer_allowed: false,
                     },
                 );
                 self.save_devices();
@@ -2786,6 +3142,7 @@ impl<P: Platform> Engine<P> {
             layout_saved: self.layout.is_saved_for(&self.device_monitors()),
             saved_layouts: self.layout.saved_count(),
             rival_programs: self.rivals.clone(),
+            dev_notices: self.dev_notices.iter().cloned().collect(),
         }
     }
 
@@ -2828,6 +3185,11 @@ impl<P: Platform> Engine<P> {
                 files_allowed: device.files_allowed,
                 screens_allowed: device.screens_allowed,
                 watching_screens: self.watchers.contains_key(&device.fingerprint),
+                developer_allowed: device.developer_allowed,
+                has_developer_mode: self
+                    .sessions
+                    .get(&device.fingerprint)
+                    .is_some_and(|session| session.up && session.features & FEATURE_DEVELOPER != 0),
             }
         });
         let available = self
@@ -2845,6 +3207,8 @@ impl<P: Platform> Engine<P> {
                 files_allowed: false,
                 screens_allowed: false,
                 watching_screens: false,
+                developer_allowed: false,
+                has_developer_mode: false,
             });
         paired.chain(available).collect()
     }

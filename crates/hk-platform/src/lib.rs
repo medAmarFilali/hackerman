@@ -18,6 +18,7 @@ use std::sync::Arc;
 
 use hk_core::apps::{AppAction, MediaCommand, RunningApp};
 use hk_core::clipboard::{ClipboardData, SharedFile};
+use hk_core::dev::{DevReply, DevRequest};
 use hk_core::geometry::Point;
 use hk_core::input::InputEvent;
 use hk_core::layout::Monitor;
@@ -28,7 +29,10 @@ use hk_core::switcher::LocalEvent;
 pub use imp::{NativePlatform, native};
 
 #[cfg(windows)]
-pub use imp::{native_for_lock_screen, serve_input_helper, session};
+pub use imp::{
+    COMPACT_DOCKER_ARGUMENT, compact_docker_disk, native_for_lock_screen, serve_input_helper,
+    session,
+};
 
 /// For tests that hand files to Windows' paste code without going through the clipboard.
 #[cfg(windows)]
@@ -144,6 +148,16 @@ pub trait Platform: Clone + Send + Sync + 'static {
     /// protected is in front, rather than showing that.
     fn capture_screen(&self, _monitor: &Monitor, _with_cursor: bool) -> Result<ScreenImage, Error> {
         Err(Error::Unsupported)
+    }
+
+    /// Developer mode: answers a request about this machine's programs, ports, disk and Docker,
+    /// and does what it asks if it asks for something. It can take minutes, so don't call it where
+    /// that would hold things up. `folders` are where to look for projects, or none for the
+    /// usual places.
+    fn developer(&self, _request: &DevRequest, _folders: &[PathBuf]) -> DevReply {
+        DevReply::Refused {
+            reason: "developer mode only works on Windows so far".into(),
+        }
     }
 }
 

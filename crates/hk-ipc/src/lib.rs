@@ -9,6 +9,7 @@
 mod transport;
 
 use hk_core::apps::{AppAction, MediaCommand, MediaState};
+use hk_core::dev::{DevReply, DevRequest};
 use hk_core::device::Fingerprint;
 use hk_core::layout::Placement;
 use hk_core::rules::Rules;
@@ -111,6 +112,20 @@ pub enum Request {
         hardware: String,
         device: Fingerprint,
     },
+    /// Developer mode: asks a device, which may be this one, about its programs, ports, disk or
+    /// Docker, or to do something. The answer comes back to the app that asked, as
+    /// [`FromAgent::Dev`] with the same ID.
+    Dev {
+        id: u64,
+        device: Fingerprint,
+        request: DevRequest,
+    },
+    /// Whether a device can use developer mode on this one: see what it's running, stop
+    /// programs and clean up.
+    SetDeveloperAllowed {
+        device: Fingerprint,
+        allowed: bool,
+    },
     /// Asks for a picture of a screen on a device, which may be this one. The answer comes
     /// back with this `id`, as a [`ScreenPicture`].
     ScreenPicture {
@@ -143,6 +158,26 @@ pub struct ScreenAsk {
 pub enum FromAgent {
     State(Box<UiState>),
     Picture(ScreenPicture),
+    Dev(DevAnswer),
+}
+
+/// The answer to [`Request::Dev`].
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DevAnswer {
+    pub id: u64,
+    pub reply: DevReply,
+}
+
+/// Something to tell the user about developer mode, like a program using too much memory, or
+/// another PC having stopped one here.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DevNotice {
+    /// Counts up, so that each is told once.
+    pub id: u64,
+    pub title: String,
+    pub text: String,
 }
 
 /// The answer to [`Request::ScreenPicture`].
@@ -209,6 +244,8 @@ pub struct UiState {
     /// Other programs running here that share the keyboard and mouse too, like "Input
     /// Director". They can get in each other's way.
     pub rival_programs: Vec<String>,
+    /// The latest things to tell the user about developer mode, oldest first.
+    pub dev_notices: Vec<DevNotice>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -305,6 +342,10 @@ pub struct DeviceView {
     pub screens_allowed: bool,
     /// It has just been looking at them.
     pub watching_screens: bool,
+    /// The user said it can use developer mode on this device.
+    pub developer_allowed: bool,
+    /// Connected, and running a version that has developer mode.
+    pub has_developer_mode: bool,
 }
 
 /// A monitor on the canvas.
@@ -498,6 +539,8 @@ mod tests {
                 files_allowed: true,
                 screens_allowed: true,
                 watching_screens: true,
+                developer_allowed: true,
+                has_developer_mode: true,
             }],
             screens: vec![],
             pairing: None,
@@ -524,8 +567,18 @@ mod tests {
             layout_saved: true,
             saved_layouts: 3,
             rival_programs: vec!["Input Director".into()],
+            dev_notices: vec![DevNotice {
+                id: 7,
+                title: "Secondary used developer mode here".into(),
+                text: "Stopped Next.js (site)".into(),
+            }],
         };
         let json = serde_json::to_value(&state).unwrap();
+        assert_eq!(json["devices"][0]["developerAllowed"], true);
+        assert_eq!(json["devices"][0]["hasDeveloperMode"], true);
+        assert_eq!(json["devNotices"][0]["text"], "Stopped Next.js (site)");
+        assert_eq!(json["rules"]["memoryAlerts"]["limitMb"], 4096);
+        assert_eq!(json["rules"]["devFolders"], serde_json::json!([]));
         assert_eq!(json["devices"][0]["screensAllowed"], true);
         assert_eq!(json["devices"][0]["watchingScreens"], true);
         assert_eq!(json["rivalPrograms"][0], "Input Director");

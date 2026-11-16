@@ -4,6 +4,7 @@ mod app_windows;
 mod apps;
 mod clipboard;
 mod cursor;
+mod dev;
 mod displays;
 mod hardware;
 mod hook;
@@ -16,6 +17,9 @@ mod screens;
 pub mod session;
 mod virtual_files;
 
+pub use dev::docker::{
+    COMPACT_ARGUMENT as COMPACT_DOCKER_ARGUMENT, compact_as_administrator as compact_docker_disk,
+};
 pub use virtual_files::data_object;
 
 use std::cell::Cell;
@@ -25,6 +29,7 @@ use std::time::{Duration, Instant};
 
 use hk_core::apps::{AppAction, MediaCommand, RunningApp};
 use hk_core::clipboard::{ClipboardData, SharedFile};
+use hk_core::dev::{DevReply, DevRequest};
 use hk_core::geometry::Point;
 use hk_core::input::InputEvent;
 use hk_core::layout::Monitor;
@@ -392,6 +397,16 @@ impl Platform for NativePlatform {
         match self.role {
             Role::Agent => screens::take(monitor, with_cursor),
             Role::Helper { .. } => Err(Error::Screen("the screen is locked".to_string())),
+        }
+    }
+
+    fn developer(&self, request: &DevRequest, folders: &[PathBuf]) -> DevReply {
+        // The system's helper has no business with the user's programs and files.
+        match self.role {
+            Role::Agent => dev::answer(request, folders),
+            Role::Helper { .. } => DevReply::Refused {
+                reason: "the screen is locked".into(),
+            },
         }
     }
 }

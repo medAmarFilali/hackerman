@@ -11,6 +11,7 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Mutex, MutexGuard, PoisonError};
 use std::time::Duration;
 
+use hk_core::dev::{DevReply, DevRequest};
 use hk_core::device::Fingerprint;
 use hk_ipc::{FromAgent, PairingStage, PictureAnswer, Request, ScreenAsk, UiState};
 use tauri::menu::{Menu, MenuItem};
@@ -36,6 +37,9 @@ const TRAY_ID: &str = "main";
 
 /// How long to wait for a picture of a screen. The agent itself gives up on another PC by then.
 const PICTURE_TIMEOUT: Duration = Duration::from_secs(8);
+/// How long to wait in developer mode. Cleaning up can take many minutes, and the agent gives up
+/// on another PC sooner than this.
+const DEV_TIMEOUT: Duration = Duration::from_secs(25 * 60);
 
 struct Bridge {
     requests: UnboundedSender<Request>,
@@ -49,6 +53,12 @@ struct Bridge {
     pictures_waiting: Mutex<HashMap<u64, oneshot::Sender<PictureAnswer>>>,
     /// Which PCs the user has been told are looking at this one's screens, since the app started.
     told_about_watching: Mutex<HashSet<Fingerprint>>,
+    next_dev: AtomicU64,
+    /// Who's waiting for which answer in developer mode.
+    dev_waiting: Mutex<HashMap<u64, oneshot::Sender<DevReply>>>,
+    /// The last developer mode notice the user has been told of. None until the first state,
+    /// whose notices are old news.
+    told_about_dev: Mutex<Option<u64>>,
 }
 
 #[tauri::command]
@@ -84,6 +94,36 @@ async fn screen_picture(
     match answer {
         Ok(Ok(answer)) => Ok(answer),
         // Lost contact with the agent, or it never answered. Asking again is all there is to do.
+        _ => Err("no answer".to_string()),
+    }
+}
+
+/// Developer mode: asks a PC, which may be this one, about itself, or to do something.
+#[tauri::command]
+async fn developer(
+    device: Fingerprint,
+    request: DevRequest,
+    bridge: State<'_, Bridge>,
+) -> Result<DevReply, String> {
+    let id = bridge.next_dev.fetch_add(1, Ordering::Relaxed);
+    let (answer_tx, answer_rx) = oneshot::channel();
+    lock(&bridge.dev_waiting).insert(id, answer_tx);
+    if bridge
+        .requests
+        .send(Request::Dev {
+            id,
+            device,
+            request,
+        })
+        .is_err()
+    {
+        lock(&bridge.dev_waiting).remove(&id);
+        return Err("the agent has gone".to_string());
+    }
+    let answer = tokio::time::timeout(DEV_TIMEOUT, answer_rx).await;
+    lock(&bridge.dev_waiting).remove(&id);
+    match answer {
+        Ok(Ok(answer)) => Ok(answer),
         _ => Err("no answer".to_string()),
     }
 }
@@ -143,6 +183,9 @@ pub fn run() {
             next_picture: AtomicU64::new(1),
             pictures_waiting: Mutex::new(HashMap::new()),
             told_about_watching: Mutex::new(HashSet::new()),
+            next_dev: AtomicU64::new(1),
+            dev_waiting: Mutex::new(HashMap::new()),
+            told_about_dev: Mutex::new(None),
         })
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_autostart::init(
@@ -152,6 +195,7 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             send_request,
             screen_picture,
+            developer,
             current_state,
             open_folder,
             open_log_folder,
@@ -324,6 +368,12 @@ async fn follow_agent(app: AppHandle, mut requests: UnboundedReceiver<Request>) 
                             let _ = waiting.send(picture.answer);
                         }
                     }
+                    Ok(Some(FromAgent::Dev(answer))) => {
+                        let waiting = lock(&app.state::<Bridge>().dev_waiting).remove(&answer.id);
+                        if let Some(waiting) = waiting {
+                            let _ = waiting.send(answer.reply);
+                        }
+                    }
                     Ok(None) | Err(_) => break,
                 },
                 request = requests.recv() => {
@@ -337,6 +387,7 @@ async fn follow_agent(app: AppHandle, mut requests: UnboundedReceiver<Request>) 
 
         // The answers to these are never coming now.
         lock(&app.state::<Bridge>().pictures_waiting).clear();
+        lock(&app.state::<Bridge>().dev_waiting).clear();
         if is_quitting(&app) {
             app.exit(0);
             return;
@@ -382,6 +433,11 @@ fn on_state(app: &AppHandle, state: UiState) {
         let bridge = app.state::<Bridge>();
         let mut told = lock(&bridge.told_about_watching);
         for news in notifications::newly_watching(&state, &mut told) {
+            notifications::show(app, news);
+        }
+        // Memory alerts and what other PCs did here, which matter even with the window closed.
+        let mut told_about_dev = lock(&bridge.told_about_dev);
+        for news in notifications::dev_notices(&state, &mut told_about_dev) {
             notifications::show(app, news);
         }
     }

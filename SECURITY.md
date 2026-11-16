@@ -34,6 +34,15 @@ at it, whatever else is switched off. On top of that:
   apps, unless you turn those off under **Settings > Apps & media**.
 - It can see what's on the screens only if you turn that on for that computer under
   **Settings > Screens**, which is off by default.
+- It can use developer mode here only if you turn that on for that computer under
+  **Settings > Developer**, which is off by default. Then it can see every program running here,
+  with its memory and the name of the project it belongs to, the ports in use, the folders and
+  caches on disk, and what's installed. It can stop programs and Docker containers, and delete
+  build folders, package caches and Docker's data, including volumes that may hold the only copy
+  of a database. It can't stop Windows' own programs, or delete anything outside build folders in
+  the folders chosen for projects, the package caches and Docker. Shrinking Docker's disk file
+  needs someone here to approve Windows' administrator prompt. You're told afterwards what it did,
+  and the log lists every request.
 - It can reach the lock and sign-in screens only if you turned that feature on, and approved that
   computer with administrator rights.
 - It can reach programs running as administrator only if you turned that same feature on. Then

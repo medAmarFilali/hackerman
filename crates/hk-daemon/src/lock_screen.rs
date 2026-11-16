@@ -119,6 +119,7 @@ fn copy_devices(from: &Path, to: &Path, approved: &[Fingerprint]) -> Result<()> 
     // What a locked PC is showing is nobody's business, whoever could see it unlocked.
     for device in &mut devices {
         device.screens_allowed = false;
+        device.developer_allowed = false;
     }
     let bytes = serde_json::to_vec_pretty(&devices).context("can't format the devices")?;
     write_if_changed(&target, &bytes)

@@ -163,6 +163,15 @@ async fn receive_loop<P: Platform>(
             Message::Showing(showing) => {
                 let _ = events.send(Event::PeerShowing { showing });
             }
+            Message::DevRequest { id, request } => {
+                let _ = events.send(Event::PeerDevRequest { peer, id, request });
+            }
+            Message::DevReply { id, reply } => {
+                let _ = events.send(Event::PeerDevReply { peer, id, reply });
+            }
+            Message::MemoryAlert(alert) => {
+                let _ = events.send(Event::PeerMemoryAlert { peer, alert });
+            }
         }
     }
 }

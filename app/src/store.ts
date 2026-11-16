@@ -2,7 +2,16 @@ import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { create } from "zustand";
 
-import type { LockScreenStatus, PictureAnswer, Request, ScreenAsk, UiState } from "@/lib/types";
+import type {
+  DevReply,
+  DevRequest,
+  Fingerprint,
+  LockScreenStatus,
+  PictureAnswer,
+  Request,
+  ScreenAsk,
+  UiState,
+} from "@/lib/types";
 
 interface AppStore {
   /** The latest state from the background agent, once it has sent one. */
@@ -26,6 +35,11 @@ export function askForPicture(ask: ScreenAsk): Promise<PictureAnswer> {
 }
 
 /** Shows a folder in File Explorer. */
+/** Developer mode: asks a PC, which may be this one, about itself, or to do something. */
+export function askDeveloper(device: Fingerprint, request: DevRequest): Promise<DevReply> {
+  return invoke("developer", { device, request });
+}
+
 export function openFolder(path: string): void {
   void invoke("open_folder", { path });
 }

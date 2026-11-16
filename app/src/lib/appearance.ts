@@ -12,6 +12,8 @@ export interface Appearance {
   mediaButtons: boolean;
   /** What's on each screen, for the PCs that allow it. */
   screenPictures: boolean;
+  /** The Developer button, for what's running on each PC and cleaning up. Off until chosen. */
+  developerMode: boolean;
 }
 
 const STORAGE_KEY = "hackerman-appearance";
@@ -29,6 +31,7 @@ function saved(): Appearance {
     appsOnScreens: stored?.appsOnScreens !== false,
     mediaButtons: stored?.mediaButtons !== false,
     screenPictures: stored?.screenPictures !== false,
+    developerMode: stored?.developerMode === true,
   };
 }
 

@@ -6,6 +6,7 @@ use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
 use hk_core::apps::{AppAction, MediaCommand, RunningApp};
 use hk_core::clipboard::{ClipboardData, SharedFile};
+use hk_core::dev::{CleanResult, DevReply, DevRequest, ProgramsReport, ToolVersion};
 use hk_core::geometry::{Point, Rect};
 use hk_core::input::InputEvent;
 use hk_core::layout::Monitor;
@@ -48,6 +49,9 @@ struct State {
     screen_captures: Vec<(String, bool)>,
     /// Makes each picture differ from the one before, like a screen that's in use.
     screens_moving: bool,
+    /// Developer mode: what's running here, and every request it was asked.
+    dev_programs: ProgramsReport,
+    dev_requests: Vec<(DevRequest, Vec<PathBuf>)>,
 }
 
 type ClipboardWatcher = Box<dyn FnMut() + Send>;
@@ -115,6 +119,16 @@ impl FakePlatform {
 
     pub fn set_monitors(&self, monitors: Vec<Monitor>) {
         self.state().monitors = monitors;
+    }
+
+    /// What developer mode finds running here.
+    pub fn set_dev_programs(&self, report: ProgramsReport) {
+        self.state().dev_programs = report;
+    }
+
+    /// Every developer mode request this machine was asked, with the folders to look in.
+    pub fn dev_requests(&self) -> Vec<(DevRequest, Vec<PathBuf>)> {
+        self.state().dev_requests.clone()
     }
 
     /// Says what some of its monitors are, as monitors with a serial number do.
@@ -411,6 +425,47 @@ impl Platform for FakePlatform {
                 || test_pattern(monitor, frame),
                 |(_, picture)| picture.clone(),
             ))
+    }
+
+    /// Programs from [`FakePlatform::set_dev_programs`], stopped by taking them off the list.
+    fn developer(&self, request: &DevRequest, folders: &[PathBuf]) -> DevReply {
+        let mut state = self.state();
+        state.dev_requests.push((request.clone(), folders.to_vec()));
+        match request {
+            DevRequest::Programs => DevReply::Programs(state.dev_programs.clone()),
+            DevRequest::Stop { program } => {
+                let programs = &mut state.dev_programs.programs;
+                match programs.iter().position(|p| p.id == *program) {
+                    Some(at) => DevReply::Done {
+                        summary: format!("Stopped {}", programs.remove(at).name),
+                    },
+                    None => DevReply::Refused {
+                        reason: "it isn't running any more".into(),
+                    },
+                }
+            }
+            DevRequest::Versions => DevReply::Versions {
+                tools: vec![ToolVersion {
+                    tool: "Node.js".into(),
+                    version: Some("22.11.0".into()),
+                }],
+            },
+            DevRequest::Clean { items } => DevReply::Cleaned {
+                results: items
+                    .iter()
+                    .map(|item| CleanResult {
+                        item: item.clone(),
+                        freed: 1000,
+                        problem: None,
+                    })
+                    .collect(),
+            },
+            DevRequest::Disk => DevReply::Disk(Default::default()),
+            DevRequest::Docker => DevReply::Docker(Default::default()),
+            _ => DevReply::Done {
+                summary: "Done".into(),
+            },
+        }
     }
 }
 

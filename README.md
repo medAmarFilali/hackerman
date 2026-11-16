@@ -39,6 +39,10 @@ You can drop files on a screen to save them on that computer, see what's on each
 bring up apps or move them between screens from the canvas. One button turns all of it off on
 a computer, and there are light and dark themes.
 
+For developers, an optional [developer mode](#developer-mode) shows what's using memory, ports
+and disk on each computer, stops leftover dev servers and Docker containers, and cleans up build
+folders and caches.
+
 > **Status:** early development, Windows only so far. Dragging a file straight across from
 > one computer's screen to another's, the Windows login screen, and macOS and Linux are
 > planned.
@@ -253,6 +257,64 @@ A screen being looked at from here can't be clicked on, and a computer can't be 
 monitor for another: that takes a display driver, which is a project of its own.
 
 All the computers involved need this version.
+
+### Developer mode
+
+Turn it on in **Settings > Developer**. It adds a **Developer** button at the top of the window,
+for this computer and for any paired computer that allows it:
+
+- **Memory.** The programs using the most memory, each counted with everything it started, so a
+  Next.js dev server shows as one program, with its project's name. Next.js, Vite, Node.js, .NET,
+  Rust, Docker, package managers and editors' helpers are recognised. **Stop** ends all of a
+  program's processes, without saving anything. Windows' own programs can't be stopped.
+- **Build helpers left running.** .NET's compiler servers, esbuild, Turborepo and Gradle keep
+  going after a build, to start the next one sooner. Stopping them is safe: the next build starts
+  them again.
+- **Ports.** What's waiting for connections on each port, like a dev server on 3000. **Free it**
+  stops the program holding the port. For a port a Docker container holds, it offers to stop that
+  container instead.
+- **Docker.** Containers, with the memory and processor they use, to start, stop or restart, and
+  a button to stop them all. Also the size of the file Docker keeps its disk in, and a way to
+  shrink it (below).
+- **Disk & cleanup.** Each drive's free space, the build folders in your projects (`node_modules`,
+  Rust's `target`, .NET's `bin` and `obj`, Next.js's `.next`), and the caches of downloaded
+  packages (npm, pnpm, NuGet, Cargo), with their sizes.
+- **Versions.** Node.js, npm, pnpm, the .NET SDKs, Rust, Docker and Git, on each computer.
+
+**Cleaning up** deletes for good. Nothing goes to the Recycle Bin. It starts with a warning to read
+and agree to, then you choose what to delete, grouped by what it costs:
+
+- **Safe.** Package caches, Docker's build cache and its images with no name come back by
+  themselves when needed. The next install or build downloads them again.
+- **Slower next build.** Build folders and Docker images no container uses have to be built or
+  installed again.
+- **Can lose data.** Docker volumes and stopped containers can hold databases and files that
+  exist nowhere else. They're hidden until you ask for them, and need **DELETE** typed to go
+  ahead.
+
+Projects changed in the last 30 days are left out unless you choose otherwise. Nothing a running
+program is using can be chosen, though Hackerman can't know about everything, like an editor
+with the project open. It only deletes build folders inside the folders listed under
+**Settings > Developer > Folders with projects**. With none listed, it uses the usual places in
+your own folder, like `source\repos` and `Documents\code`. Each folder is checked again just
+before it's deleted.
+
+**Shrinking Docker's disk file.** Cleaning up inside Docker frees space in that file, but the file
+doesn't get smaller by itself. Quit Docker Desktop first. Shrinking stops every WSL Linux on that
+computer, Windows asks for administrator permission there, and it can take several minutes.
+
+**Memory alerts**, also under **Settings > Developer** and off until you turn them on, notify you
+when one program on this computer, with everything it started, uses more memory than the amount
+you choose. Computers allowed to use developer mode here are told too.
+
+**Using it on another computer.** Open Hackerman on the computer to be used, go to
+**Settings > Developer**, and turn it on for the computer asking. That computer can then see
+everything above and stop programs and containers, and delete what cleanup offers, without
+asking first. The computer it's used on gets a notification afterwards saying what was done, and
+its log lists every request. Only allow computers whose users you trust with all of that. Both
+computers need this version.
+
+Developer mode works on Windows only for now.
 
 ### Keyboard shortcuts
 

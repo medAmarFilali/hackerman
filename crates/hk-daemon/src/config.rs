@@ -116,6 +116,10 @@ pub struct PairedDevice {
     /// What its monitors said they were, for a monitor plugged into it and another device.
     #[serde(default)]
     pub monitor_identities: Vec<MonitorIdentity>,
+    /// The user said it can use developer mode here: see what's running, stop programs and
+    /// clean up.
+    #[serde(default)]
+    pub developer_allowed: bool,
 }
 
 pub fn load_devices(dir: &Path) -> Result<Vec<PairedDevice>> {

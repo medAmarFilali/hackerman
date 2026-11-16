@@ -5,6 +5,7 @@ import { DevicesPanel } from "@/components/DevicesPanel";
 import { IncomingFilesDialog } from "@/components/IncomingFilesDialog";
 import { CanvasGuide, MonitorCanvas } from "@/components/MonitorCanvas";
 import { PairingDialog } from "@/components/PairingDialog";
+import { DeveloperButton } from "@/components/DeveloperDialog";
 import { SettingsDialog } from "@/components/SettingsDialog";
 import { ThemeSwitch } from "@/components/ThemeSwitch";
 import { Button } from "@/components/ui/button";
@@ -117,6 +118,7 @@ function TopBar({ state }: { state: UiState }) {
         <span className="eyebrow tracking-normal normal-case tabular-nums">{state.me.version}</span>
       </h1>
       <div className="flex items-center gap-2">
+        <DeveloperButton state={state} />
         <ThemeSwitch />
         <SettingsDialog state={state} />
       </div>

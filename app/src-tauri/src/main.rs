@@ -19,6 +19,13 @@ fn main() {
             finish(lock_screen::remove_and_report());
         } else if given(lock_screen::INPUT_HELPER_ARGUMENT) {
             finish(lock_screen::run_input_helper(&arguments));
+        } else if let Some(at) = arguments
+            .iter()
+            .position(|argument| argument == hk_platform::COMPACT_DOCKER_ARGUMENT)
+        {
+            // Run with administrator rights, from developer mode.
+            let path = arguments.get(at + 1).map_or("", String::as_str);
+            finish(hk_platform::compact_docker_disk(path));
         } else if given(hackerman_app::AGENT_ARGUMENT) && given(lock_screen::HELPER_ARGUMENT) {
             finish(lock_screen::run_helper(&arguments));
         }

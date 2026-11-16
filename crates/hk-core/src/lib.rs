@@ -9,6 +9,7 @@
 
 pub mod apps;
 pub mod clipboard;
+pub mod dev;
 pub mod device;
 pub mod geometry;
 pub mod input;

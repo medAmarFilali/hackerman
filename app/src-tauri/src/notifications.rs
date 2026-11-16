@@ -72,6 +72,27 @@ pub fn newly_watching(state: &UiState, told: &mut HashSet<Fingerprint>) -> Vec<A
         .collect()
 }
 
+/// Developer mode notices newer than the last one told. Those already there the first time are
+/// old news, from before the app started.
+pub fn dev_notices(state: &UiState, told: &mut Option<u64>) -> Vec<Arrival> {
+    let newest = state.dev_notices.iter().map(|notice| notice.id).max();
+    let Some(last_told) = *told else {
+        *told = Some(newest.unwrap_or(0));
+        return Vec::new();
+    };
+    *told = Some(newest.unwrap_or(0).max(last_told));
+    state
+        .dev_notices
+        .iter()
+        .filter(|notice| notice.id > last_told)
+        .map(|notice| Arrival {
+            title: shortened(&notice.title),
+            text: shortened(&notice.text),
+            folder: None,
+        })
+        .collect()
+}
+
 /// What the tray icon says when pointed at.
 pub fn tray_tooltip(state: &UiState) -> String {
     let watching: Vec<&str> = state
@@ -144,7 +165,7 @@ pub fn show(_app: &AppHandle, arrival: Arrival) {
 mod tests {
     use hk_core::device::Fingerprint;
     use hk_core::rules::Rules;
-    use hk_ipc::{ControlView, DeviceStatus, DeviceView, ThisDevice};
+    use hk_ipc::{ControlView, DevNotice, DeviceStatus, DeviceView, ThisDevice};
 
     use super::*;
 
@@ -185,6 +206,8 @@ mod tests {
                 files_allowed: false,
                 screens_allowed: true,
                 watching_screens: false,
+                developer_allowed: false,
+                has_developer_mode: true,
             }],
             screens: vec![],
             pairing: None,
@@ -200,6 +223,7 @@ mod tests {
             layout_saved: true,
             saved_layouts: 1,
             rival_programs: vec![],
+            dev_notices: vec![],
         }
     }
 
@@ -292,5 +316,26 @@ mod tests {
         arriving.label = long;
         let found = arrivals(&state_with(vec![]), &state_with(vec![arriving]));
         assert_eq!(found[0].text.chars().count(), MAX_TEXT);
+    }
+
+    #[test]
+    fn developer_notices_are_told_once_and_old_ones_not_at_all() {
+        let notice = |id: u64, text: &str| DevNotice {
+            id,
+            title: "Memory alert".into(),
+            text: text.into(),
+        };
+        let mut state = state_with(vec![]);
+        state.dev_notices = vec![notice(1, "from before the app started")];
+        let mut told = None;
+        assert!(dev_notices(&state, &mut told).is_empty(), "old news");
+
+        state
+            .dev_notices
+            .push(notice(2, "Next.js (site) is using 5.2 GB"));
+        let news = dev_notices(&state, &mut told);
+        assert_eq!(news.len(), 1);
+        assert_eq!(news[0].text, "Next.js (site) is using 5.2 GB");
+        assert!(dev_notices(&state, &mut told).is_empty(), "once");
     }
 }
