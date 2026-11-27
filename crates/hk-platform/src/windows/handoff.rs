@@ -221,7 +221,7 @@ fn explorer_folder(window: HWND) -> Option<PathBuf> {
     }
 }
 
-/// `file:///c%3A/Users/one` as `c:\Users\one`. Other kinds of address give nothing.
+/// `file:///c%3A/Users/sam` as `c:\Users\sam`. Other kinds of address give nothing.
 fn path_of_url(url: &str) -> Option<PathBuf> {
     // VS Code writes the drive's colon as %3A, which Windows then takes for part of a name.
     let url = url.replace("%3A", ":").replace("%3a", ":");
@@ -331,9 +331,9 @@ mod tests {
     #[test]
     fn a_vs_code_title_is_matched_to_its_folder() {
         let storage = r#"{"windowsState": {
-            "lastActiveWindow": {"folder": "file:///c%3A/Users/one/Documents/code/sawt-rnd"},
+            "lastActiveWindow": {"folder": "file:///c%3A/Users/sam/Documents/code/website"},
             "openedWindows": [
-                {"folder": "file:///c%3A/Users/one/Documents/code/hackerman"},
+                {"folder": "file:///c%3A/Users/sam/Documents/code/hackerman"},
                 {"folder": "vscode-remote://ssh-remote%2Bbox/home/x"},
                 {"workspaceIdentifier": {"id": "1"}}
             ]}}"#;
@@ -341,18 +341,18 @@ mod tests {
         assert_eq!(
             folders,
             [
-                PathBuf::from(r"c:\Users\one\Documents\code\sawt-rnd"),
-                PathBuf::from(r"c:\Users\one\Documents\code\hackerman"),
+                PathBuf::from(r"c:\Users\sam\Documents\code\website"),
+                PathBuf::from(r"c:\Users\sam\Documents\code\hackerman"),
             ]
         );
         let found = |title| folder_in_title(title, &folders).map(Path::to_path_buf);
         assert_eq!(
             found("● engine.rs - hackerman - Visual Studio Code"),
-            Some(PathBuf::from(r"c:\Users\one\Documents\code\hackerman"))
+            Some(PathBuf::from(r"c:\Users\sam\Documents\code\hackerman"))
         );
         assert_eq!(
-            found("sawt-rnd - Visual Studio Code"),
-            Some(PathBuf::from(r"c:\Users\one\Documents\code\sawt-rnd"))
+            found("website - Visual Studio Code"),
+            Some(PathBuf::from(r"c:\Users\sam\Documents\code\website"))
         );
         assert_eq!(found("notes - other - Visual Studio Code"), None);
         assert!(vs_code_folders("not json").is_empty());

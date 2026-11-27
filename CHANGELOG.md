@@ -17,6 +17,11 @@ Versions before 0.10.0 weren't published.
   **Settings > Clipboard & files** lists them, with a button to stop.
   [ADR 2](docs/adr/0002-linked-copies-of-handed-off-files.md) has the details.
 
+### Changed
+
+- Updated two libraries the app's window uses, `url` and `cookie`, past published advisories
+  (RUSTSEC-2026-0592 and RUSTSEC-2026-0594).
+
 ### Known limits
 
 - Finding which file an app has open can miss, and Hackerman then says so.

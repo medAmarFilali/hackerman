@@ -169,26 +169,29 @@ mod tests {
         assert_eq!(page("powershell").browser(), None);
     }
 
+    // Drives and `\\server` shares only mean something to Windows' paths.
+    #[cfg(windows)]
     #[test]
     fn only_folders_on_this_computers_drives_are_opened() {
         let folder = |path: &str| Opening::Folder {
             folder: path.into(),
         };
-        assert!(folder(r"C:\Users\one\Documents\code\hackerman").is_safe());
+        assert!(folder(r"C:\Users\sam\Documents\code\hackerman").is_safe());
         assert!(!folder(r"\\server\share\x").is_safe());
         assert!(!folder(r"code\hackerman").is_safe());
         assert!(!folder(r"C:\Users\..\Windows").is_safe());
         assert!(!folder(r#"C:\a" --x"#).is_safe());
     }
 
+    #[cfg(windows)]
     #[test]
     fn a_folder_in_another_users_home_is_looked_for_in_mine() {
-        let home = Path::new(r"C:\Users\amar");
+        let home = Path::new(r"C:\Users\alex");
         assert_eq!(
-            places_to_look(Path::new(r"C:\Users\one\Documents\code\x"), home),
+            places_to_look(Path::new(r"C:\Users\sam\Documents\code\x"), home),
             [
-                PathBuf::from(r"C:\Users\one\Documents\code\x"),
-                PathBuf::from(r"C:\Users\amar\Documents\code\x"),
+                PathBuf::from(r"C:\Users\sam\Documents\code\x"),
+                PathBuf::from(r"C:\Users\alex\Documents\code\x"),
             ]
         );
         assert_eq!(
@@ -196,8 +199,8 @@ mod tests {
             [PathBuf::from(r"D:\work\x")]
         );
         assert_eq!(
-            places_to_look(Path::new(r"C:\Users\amar\x"), home),
-            [PathBuf::from(r"C:\Users\amar\x")]
+            places_to_look(Path::new(r"C:\Users\alex\x"), home),
+            [PathBuf::from(r"C:\Users\alex\x")]
         );
     }
 }

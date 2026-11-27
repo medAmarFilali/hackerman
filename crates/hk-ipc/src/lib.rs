@@ -600,7 +600,7 @@ mod tests {
             }],
             linked_files: vec![LinkedFileView {
                 id: "1-ab".into(),
-                path: r"C:\Users\one\Documents\Hackerman\report.docx".into(),
+                path: r"C:\Users\sam\Documents\Hackerman\report.docx".into(),
                 peer_name: "MAIN".into(),
                 waiting: true,
             }],
