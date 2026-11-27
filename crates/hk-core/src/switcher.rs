@@ -31,6 +31,26 @@ use crate::rules::{CrossModifier, Rules, Shortcut};
 /// Nearer than this can be a single report from the mouse.
 const PARKED_CURSOR_MOVED: f64 = 150.0;
 
+/// Ctrl+Shift+B keeps the cursor moving while nobody's using the computer, so that programs
+/// like Teams don't show its user as away.
+const KEEP_MOVING: Shortcut = Shortcut {
+    ctrl: true,
+    alt: false,
+    shift: true,
+    meta: false,
+    key: Some(KeyCode::KeyB),
+};
+
+/// While the cursor is kept moving, how long the keyboard and mouse have to be left alone
+/// before it's nudged, and how often after that. Teams shows someone as away after 5 minutes.
+const NUDGE_EVERY: Duration = Duration::from_secs(15);
+
+/// How far a nudge moves the cursor, in pixels. The next one moves it back.
+const NUDGE_BY: f64 = 10.0;
+
+/// Input that moves nothing, which Windows still counts as someone using the computer.
+pub const STAY_ACTIVE: InputEvent = InputEvent::PointerMotion { dx: 0.0, dy: 0.0 };
+
 /// Input from this machine's own keyboard and mouse. On Windows it can come from another
 /// program on the same machine, which is what serializing it is for.
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
@@ -73,6 +93,10 @@ pub enum Action {
     StateChanged,
     /// A media shortcut was pressed. It's for whatever is playing, wherever that is.
     Media(MediaCommand),
+    /// Replay this on this machine, as input from someone using it.
+    Inject(InputEvent),
+    /// The cursor is now kept moving while nobody uses the computer, or no longer is.
+    KeepMoving(bool),
 }
 
 #[derive(Debug, Default, PartialEq)]
@@ -134,6 +158,13 @@ pub struct Switcher {
     media_available: bool,
     /// The user is choosing a new shortcut, so the keys are for the window asking.
     shortcuts_paused: bool,
+    /// Ctrl+Shift+B turned this on.
+    keep_moving: bool,
+    /// When this machine's own keyboard or mouse was last used.
+    last_input: Duration,
+    last_nudge: Duration,
+    /// Which way the last nudge went, if the next one is to bring the cursor back.
+    nudged_by: Option<f64>,
     now: Duration,
 }
 
@@ -161,6 +192,10 @@ impl Switcher {
             jump_order: Vec::new(),
             media_available: false,
             shortcuts_paused: false,
+            keep_moving: false,
+            last_input: Duration::ZERO,
+            last_nudge: Duration::ZERO,
+            nudged_by: None,
             now: Duration::ZERO,
         }
     }
@@ -273,6 +308,7 @@ impl Switcher {
     /// `now` is the time of the event, measured from any fixed starting point.
     pub fn handle_local(&mut self, event: LocalEvent, now: Duration) -> Outcome {
         self.now = now;
+        self.last_input = now;
         if let LocalEvent::Key { code, pressed } = event
             && let Some(outcome) = self.handle_shortcut(code, pressed)
         {
@@ -320,31 +356,47 @@ impl Switcher {
                 return Some(Outcome::swallow(actions));
             }
         }
+        if self.shortcut_pressed(code) == Some(KEEP_MOVING) {
+            self.shortcut_keys.insert(code);
+            self.keep_moving = !self.keep_moving;
+            self.nudged_by = None;
+            let mut actions = vec![Action::KeepMoving(self.keep_moving)];
+            if self.keep_moving {
+                // At once, to show it's on.
+                actions.extend(self.nudge_now(self.now));
+            }
+            return Some(Outcome::swallow(actions));
+        }
         let command = self.media_shortcut(code)?;
         self.shortcut_keys.insert(code);
         Some(Outcome::swallow(vec![Action::Media(command)]))
     }
 
-    /// Which media shortcut this key completes, if any. It has to be just those modifiers,
-    /// so that a shortcut on Ctrl+Space doesn't also take Ctrl+Shift+Space. As above, AltGr
-    /// doesn't count as anything: Windows reports it as Ctrl + right Alt.
-    fn media_shortcut(&self, code: KeyCode) -> Option<MediaCommand> {
-        let shortcuts = &self.rules.media_shortcuts;
-        if !shortcuts.enabled || !self.media_available {
-            return None;
-        }
+    /// The shortcut this key makes with exactly the modifiers held, so that one on Ctrl+Space
+    /// doesn't also take Ctrl+Shift+Space. As above, AltGr makes none: Windows reports it as
+    /// Ctrl + right Alt.
+    fn shortcut_pressed(&self, code: KeyCode) -> Option<Shortcut> {
         let held = |code| self.local_keys.contains(&code) || self.remote_keys.contains(&code);
         let ctrl = held(KeyCode::ControlLeft) || held(KeyCode::ControlRight);
         if ctrl && held(KeyCode::AltRight) {
             return None;
         }
-        let pressed = Shortcut {
+        Some(Shortcut {
             ctrl,
             alt: held(KeyCode::AltLeft) || held(KeyCode::AltRight),
             shift: held(KeyCode::ShiftLeft) || held(KeyCode::ShiftRight),
             meta: held(KeyCode::MetaLeft) || held(KeyCode::MetaRight),
             key: Some(code),
-        };
+        })
+    }
+
+    /// Which media shortcut this key completes, if any.
+    fn media_shortcut(&self, code: KeyCode) -> Option<MediaCommand> {
+        let shortcuts = &self.rules.media_shortcuts;
+        if !shortcuts.enabled || !self.media_available {
+            return None;
+        }
+        let pressed = self.shortcut_pressed(code)?;
         [
             (shortcuts.play_pause, MediaCommand::PlayPause),
             (shortcuts.back, MediaCommand::Back),
@@ -352,6 +404,69 @@ impl Switcher {
         ]
         .into_iter()
         .find_map(|(shortcut, command)| (shortcut == pressed).then_some(command))
+    }
+
+    pub fn keep_moving(&self) -> bool {
+        self.keep_moving
+    }
+
+    /// Ctrl+Shift+B was pressed on another device.
+    pub fn set_keep_moving(&mut self, on: bool) {
+        self.keep_moving = on;
+        self.nudged_by = None;
+    }
+
+    /// Called now and then. While the cursor is kept moving and nothing has been touched for
+    /// a while, nudges it.
+    pub fn nudge_while_away(&mut self, now: Duration) -> Vec<Action> {
+        if !self.keep_moving || now.saturating_sub(self.last_nudge) < NUDGE_EVERY {
+            return vec![];
+        }
+        if now.saturating_sub(self.last_input) >= NUDGE_EVERY {
+            return self.nudge_now(now);
+        }
+        // This keyboard and mouse are in use on another device, which Windows may not count
+        // as using this one, since none of it gets here.
+        if self.remote.is_some() {
+            self.last_nudge = now;
+            return vec![Action::Inject(STAY_ACTIVE)];
+        }
+        vec![]
+    }
+
+    /// Moves the cursor a little along the screen it's on, or back where the last nudge
+    /// moved it from. Here it's moved by replaying input, since Windows doesn't count the
+    /// usual way of putting the cursor somewhere as anyone using the computer.
+    fn nudge_now(&mut self, now: Duration) -> Vec<Action> {
+        self.last_nudge = now;
+        let (device, at) = match self.remote {
+            Some(remote) => (remote.device, remote.cursor),
+            None => (self.me, self.last_position),
+        };
+        let bounds = self
+            .topology
+            .screen_at(device, at)
+            .map(|screen| screen.monitor.bounds);
+        let dx = match self.nudged_by.take() {
+            Some(dx) => -dx,
+            None => {
+                let fits = bounds.is_none_or(|b| b.contains(Point::new(at.x + NUDGE_BY, at.y)));
+                let dx = if fits { NUDGE_BY } else { -NUDGE_BY };
+                self.nudged_by = Some(dx);
+                dx
+            }
+        };
+        match self.remote {
+            Some(remote) => {
+                let moved = Point::new(at.x + dx, at.y);
+                let moved = bounds.map_or(moved, |b| clamp_to_pixels(moved, b));
+                let mut actions = self.place_remote_cursor(remote, moved);
+                // This one's parked cursor can't move, or the next real move would be off.
+                actions.push(Action::Inject(STAY_ACTIVE));
+                actions
+            }
+            None => vec![Action::Inject(InputEvent::PointerMotion { dx, dy: 0.0 })],
+        }
     }
 
     /// Moves control straight to the middle of `device`'s main monitor. A
@@ -967,6 +1082,89 @@ mod tests {
             Outcome::swallow(vec![Action::Media(MediaCommand::PlayPause)])
         );
         assert_eq!(s.controlling(), Some(PEER), "the cursor stays where it is");
+    }
+
+    fn press_keep_moving(s: &mut Switcher) -> Outcome {
+        press_all(s, &[KeyCode::ControlLeft, KeyCode::ShiftLeft]);
+        let outcome = s.local(key(KeyCode::KeyB, true));
+        for code in [KeyCode::KeyB, KeyCode::ShiftLeft, KeyCode::ControlLeft] {
+            s.local(key(code, false));
+        }
+        outcome
+    }
+
+    fn wiggle(dx: f64) -> Action {
+        Action::Inject(InputEvent::PointerMotion { dx, dy: 0.0 })
+    }
+
+    #[test]
+    fn ctrl_shift_b_keeps_the_cursor_moving_while_nobody_uses_the_computer() {
+        let mut s = peer_on_the_right();
+        let secs = Duration::from_secs;
+        assert_eq!(
+            press_keep_moving(&mut s),
+            Outcome::swallow(vec![Action::KeepMoving(true), wiggle(10.0)])
+        );
+        assert_eq!(s.nudge_while_away(secs(14)), []);
+        assert_eq!(s.nudge_while_away(secs(15)), [wiggle(-10.0)], "and back");
+
+        // Someone's using it, so nothing until it's left alone again.
+        s.handle_local(motion(500.0, 500.0), secs(20));
+        assert_eq!(s.nudge_while_away(secs(34)), []);
+        assert_eq!(s.nudge_while_away(secs(35)), [wiggle(10.0)]);
+
+        assert_eq!(
+            press_keep_moving(&mut s),
+            Outcome::swallow(vec![Action::KeepMoving(false)])
+        );
+        assert_eq!(s.nudge_while_away(secs(100)), []);
+    }
+
+    #[test]
+    fn the_cursor_is_kept_moving_on_the_screen_it_is_on() {
+        let mut s = peer_on_the_right();
+        s.local(motion(1915.0, 540.0));
+        assert_eq!(press_keep_moving(&mut s).actions[1], wiggle(-10.0));
+
+        // On another computer, it's moved there.
+        let mut s = peer_on_the_right();
+        s.local(motion(1919.0, 540.0));
+        assert_eq!(s.controlling(), Some(PEER));
+        assert_eq!(
+            press_keep_moving(&mut s).actions,
+            [
+                Action::KeepMoving(true),
+                at(PEER, 10.0, 540.0),
+                Action::Inject(STAY_ACTIVE)
+            ]
+        );
+        assert_eq!(s.controlling(), Some(PEER), "without leaving it");
+    }
+
+    #[test]
+    fn a_computer_whose_keyboard_is_in_use_on_another_is_kept_active_too() {
+        let mut s = peer_on_the_right();
+        let secs = Duration::from_secs;
+        s.local(motion(1919.0, 540.0));
+        press_keep_moving(&mut s);
+        s.handle_local(key(KeyCode::KeyA, true), secs(15));
+        assert_eq!(s.nudge_while_away(secs(15)), [Action::Inject(STAY_ACTIVE)]);
+        assert_eq!(s.nudge_while_away(secs(20)), []);
+
+        // At home, typing is enough.
+        let mut s = peer_on_the_right();
+        press_keep_moving(&mut s);
+        s.handle_local(key(KeyCode::KeyA, true), secs(15));
+        assert_eq!(s.nudge_while_away(secs(15)), []);
+    }
+
+    #[test]
+    fn another_computer_can_keep_this_one_moving() {
+        let mut s = peer_on_the_right();
+        s.set_keep_moving(true);
+        assert_eq!(s.nudge_while_away(Duration::from_secs(15)), [wiggle(10.0)]);
+        s.set_keep_moving(false);
+        assert_eq!(s.nudge_while_away(Duration::from_secs(60)), []);
     }
 
     #[test]

@@ -3735,6 +3735,61 @@ async fn wait_for_media_command(device: &Device, app: &str, command: MediaComman
         });
 }
 
+/// Ctrl+Shift+B, so that programs like Teams don't show someone as away. Windows only counts
+/// the cursor moving as someone using the computer if it's moved by input, so it's replayed.
+#[tokio::test(flavor = "multi_thread")]
+async fn ctrl_shift_b_moves_the_cursor_by_itself() {
+    let (a, _b) = side_by_side().await;
+    assert!(press_keep_moving(&a), "the program in front doesn't get it");
+    assert_eq!(
+        a.platform.injected(),
+        [InputEvent::PointerMotion { dx: 10.0, dy: 0.0 }]
+    );
+}
+
+/// Pressed on any computer, it's for all of them, and the last press wins.
+#[tokio::test(flavor = "multi_thread")]
+async fn ctrl_shift_b_keeps_every_computer_active() {
+    let (a, mut peer) = device_with_hand_written_peer(FEATURES).await;
+    press_keep_moving(&a);
+    let (on, changed_at) = next_keep_moving(&mut peer).await;
+    assert!(on);
+
+    // Turned off on the other one since, and an older word that went astray.
+    for (on, changed_at) in [(false, changed_at + 1), (true, changed_at - 1)] {
+        let message = Message::KeepMoving { on, changed_at };
+        peer.sender.send(&message).await.unwrap();
+    }
+    // Messages arrive in order, so once this has opened, those were dealt with.
+    peer.sender.send(&Message::Open(a_page())).await.unwrap();
+    wait_for_opened(&a, &a_page()).await;
+    press_keep_moving(&a);
+    assert!(
+        next_keep_moving(&mut peer).await.0,
+        "it was off, so now it's on"
+    );
+}
+
+/// Presses Ctrl+Shift+B on this device's keyboard. Returns whether it was hidden.
+fn press_keep_moving(device: &Device) -> bool {
+    device.press(KeyCode::ControlLeft, true);
+    device.press(KeyCode::ShiftLeft, true);
+    let hidden = device.press(KeyCode::KeyB, true);
+    device.press(KeyCode::KeyB, false);
+    device.press(KeyCode::ShiftLeft, false);
+    device.press(KeyCode::ControlLeft, false);
+    hidden
+}
+
+async fn next_keep_moving(peer: &mut HandWrittenPeer) -> (bool, u64) {
+    loop {
+        let message = tokio::time::timeout(TIMEOUT, peer.receiver.recv()).await;
+        if let Message::KeepMoving { on, changed_at } = message.unwrap().unwrap() {
+            return (on, changed_at);
+        }
+    }
+}
+
 /// Holds Ctrl and the left Alt on this device's keyboard, and presses a key.
 fn press_with_ctrl_alt(device: &Device, code: KeyCode) -> bool {
     device.press(KeyCode::ControlLeft, true);

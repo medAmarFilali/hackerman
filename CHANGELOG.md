@@ -3,6 +3,22 @@
 Downloads are on the [releases page](https://github.com/medAmarFilali/hackerman/releases).
 Versions before 0.10.0 weren't published.
 
+## 0.13.1
+
+### Added
+
+- **Ctrl+Shift+B keeps every computer active** while nobody uses it, so that programs like
+  Teams don't show you as away. Each computer moves its cursor 10 pixels and back now and then.
+  One whose keyboard is in use on another computer stays active without its cursor moving.
+  Pressing it again, on any computer, stops it. It isn't in Settings, isn't remembered after a
+  restart, and takes Ctrl+Shift+B from other programs, such as VS Code's Run Build Task. While
+  it's on, computers don't lock themselves or go to sleep.
+
+### Known limits
+
+- It needs this version on every computer, and has only been tried between simulated computers
+  so far.
+
 ## 0.13.0
 
 ### Added

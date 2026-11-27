@@ -118,8 +118,18 @@ impl<P: Platform> Shared<P> {
                 Action::Media(command) => {
                     let _ = self.events.send(Event::MediaShortcut(command));
                 }
+                Action::Inject(event) => self.platform.inject(&event),
+                Action::KeepMoving(on) => {
+                    let _ = self.events.send(Event::KeepMoving(on));
+                }
             }
         }
+    }
+
+    /// See [`Switcher::nudge_while_away`].
+    pub fn nudge_while_away(&self) {
+        let actions = self.switcher().nudge_while_away(self.started.elapsed());
+        self.apply(actions);
     }
 
     fn send(&self, device: Fingerprint, message: Message) {

@@ -200,6 +200,9 @@ async fn receive_loop<P: Platform>(
             Message::LinkEnded { link } => {
                 let _ = events.send(Event::PeerLinkEnded { peer, link });
             }
+            Message::KeepMoving { on, changed_at } => {
+                let _ = events.send(Event::PeerKeepMoving { on, changed_at });
+            }
         }
     }
 }

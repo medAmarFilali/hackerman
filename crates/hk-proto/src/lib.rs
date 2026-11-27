@@ -57,6 +57,9 @@ pub const FEATURE_DEVELOPER: u32 = 1 << 7;
 /// Can hand off what an app has open to another device, and open what's handed off to it.
 pub const FEATURE_HANDOFF: u32 = 1 << 8;
 
+/// Keeps itself active while nobody uses it, when told to by [`Message::KeepMoving`].
+pub const FEATURE_KEEP_MOVING: u32 = 1 << 9;
+
 /// Everything this version can do beyond the base protocol, for [`Message::Hello`].
 pub const FEATURES: u32 = FEATURE_FILES
     | FEATURE_SEND_FILES
@@ -66,7 +69,8 @@ pub const FEATURES: u32 = FEATURE_FILES
     | FEATURE_APP_ACTIONS
     | FEATURE_SHARED_MONITORS
     | FEATURE_DEVELOPER
-    | FEATURE_HANDOFF;
+    | FEATURE_HANDOFF
+    | FEATURE_KEEP_MOVING;
 
 /// A message sent from one peer to another.
 ///
@@ -178,6 +182,13 @@ pub enum Message {
     /// The sender stopped keeping a linked file the same. Needs [`FEATURE_HANDOFF`].
     LinkEnded {
         link: ClipVersion,
+    },
+    /// Ctrl+Shift+B was pressed somewhere, `changed_at` milliseconds after 1970, so every device
+    /// keeps itself active while nobody uses it, or stops. Sent again when a device connects,
+    /// and the newest word wins. Needs [`FEATURE_KEEP_MOVING`].
+    KeepMoving {
+        on: bool,
+        changed_at: u64,
     },
 }
 
@@ -611,6 +622,10 @@ mod tests {
         round_trip(Message::LinkShared { link, version });
         round_trip(Message::LinkChanged { link, version });
         round_trip(Message::LinkEnded { link });
+        round_trip(Message::KeepMoving {
+            on: true,
+            changed_at: 1_795_000_000_000,
+        });
         for want in [
             LinkWant::Pieces,
             LinkWant::Bytes {
