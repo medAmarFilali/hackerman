@@ -5248,20 +5248,18 @@ async fn the_pc_whose_canvas_is_used_can_ask_another_to_hand_off() {
     let (a, mut b) = side_by_side().await;
     let (a_id, b_id) = (a.fingerprint(), b.fingerprint());
     a.platform
-        .set_running_apps(vec![window_of("code", "Visual Studio Code", &["fake-0"])]);
-    let project = Opening::Project {
-        folder: r"C:\code\hackerman".into(),
-    };
-    a.platform.set_open_in("code", Found::Open(project.clone()));
-    b.wait_for("the app", |s| on_screen(s, a_id, "code")).await;
+        .set_running_apps(vec![window_of("msedge", "Microsoft Edge", &["fake-0"])]);
+    a.platform.set_open_in("msedge", Found::Open(a_page()));
+    b.wait_for("the app", |s| on_screen(s, a_id, "msedge"))
+        .await;
     b.request(Request::HandOff {
         device: a_id,
-        app: "code".into(),
+        app: "msedge".into(),
         monitor: Some("fake-0".into()),
         to: b_id,
     })
     .await;
-    wait_for_opened(&b, &project).await;
+    wait_for_opened(&b, &a_page()).await;
 }
 
 #[tokio::test(flavor = "multi_thread")]
