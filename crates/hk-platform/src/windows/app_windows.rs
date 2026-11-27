@@ -39,13 +39,18 @@ fn windows_of(app: &str, monitors: &HashMap<isize, String>) -> Vec<(HWND, Option
         .collect()
 }
 
-fn bring_up(app: &str, monitor: Option<&str>) -> Result<(), Error> {
+/// An app's frontmost window on this monitor if it has one there, or anywhere.
+pub(super) fn front_window(app: &str, monitor: Option<&str>) -> Option<HWND> {
     let windows = windows_of(app, &displays::ids_by_handle());
-    let chosen = windows
+    windows
         .iter()
         .find(|(_, on)| on.as_deref() == monitor && monitor.is_some())
-        .or_else(|| windows.first());
-    let Some(&(window, _)) = chosen else {
+        .or_else(|| windows.first())
+        .map(|&(window, _)| window)
+}
+
+fn bring_up(app: &str, monitor: Option<&str>) -> Result<(), Error> {
+    let Some(window) = front_window(app, monitor) else {
         return Err(Error::AppWindows(format!("{app} has no window to show")));
     };
     // SAFETY: these only ask things of a window, and a window that has gone since isn't an

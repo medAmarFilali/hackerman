@@ -14,6 +14,7 @@ use hk_core::clipboard::{ClipVersion, ClipboardData, ClipboardImage, SharedFile}
 use hk_core::dev::{DevReply, DevRequest, Program, ProgramId, ProgramKind, ProgramsReport};
 use hk_core::device::Fingerprint;
 use hk_core::geometry::{Point, Rect};
+use hk_core::handoff::{Found, Opening};
 use hk_core::input::{InputEvent, KeyCode};
 use hk_core::layout::{LayoutDoc, Monitor, Placement};
 use hk_core::rules::{CrossModifier, NameClash, ReceiveFiles, Rules, Shortcut};
@@ -29,9 +30,9 @@ use hk_net::{Endpoint, Identity, TrustStore};
 use hk_platform::Platform;
 use hk_platform::fake::FakePlatform;
 use hk_proto::{
-    ClipboardBlob, FEATURE_APP_ACTIONS, FEATURE_FILES, FEATURE_SCREENS, FEATURE_SEND_FILES,
-    FEATURES, FileAnswer, FileRequest, Message, PROTOCOL_VERSION, PeerRequest, ScreenAnswer,
-    ScreenRequest, TransferUpdate,
+    ClipboardBlob, FEATURE_APP_ACTIONS, FEATURE_FILES, FEATURE_HANDOFF, FEATURE_SCREENS,
+    FEATURE_SEND_FILES, FEATURES, FileAnswer, FileRequest, LinkAnswer, LinkRequest, LinkWant,
+    Message, PROTOCOL_VERSION, PeerRequest, ScreenAnswer, ScreenRequest, TransferUpdate,
 };
 use tokio::task::JoinHandle;
 
@@ -2271,6 +2272,7 @@ async fn file_names_that_could_escape_the_folder_are_refused() {
             modified_ms: None,
         }],
         save_to_folder: false,
+        open_when_saved: false,
     };
     let send = |blob: ClipboardBlob| {
         let blobs = peer.blobs.clone();
@@ -2312,6 +2314,7 @@ async fn a_device_cannot_send_more_than_it_said() {
             modified_ms: None,
         }],
         save_to_folder: false,
+        open_when_saved: false,
     };
     peer.blobs
         .send(&hk_proto::encode_clipboard(&blob).unwrap())
@@ -3585,6 +3588,7 @@ async fn files_sent_with_names_that_could_escape_are_refused() {
             modified_ms: None,
         }],
         save_to_folder: true,
+        open_when_saved: false,
     };
     peer.blobs
         .send(&hk_proto::encode_clipboard(&blob("../../evil.exe", id)).unwrap())
@@ -3623,6 +3627,7 @@ async fn files_offered_in_the_name_of_another_device_are_ignored() {
             modified_ms: None,
         }],
         save_to_folder: true,
+        open_when_saved: false,
     };
     peer.blobs
         .send(&hk_proto::encode_clipboard(&blob).unwrap())
@@ -5192,4 +5197,336 @@ async fn the_folders_chosen_are_where_projects_are_looked_for() {
     let asked = a.platform.dev_requests();
     let (_, folders) = asked.last().unwrap();
     assert_eq!(folders, &[std::path::PathBuf::from(r"C:\code")]);
+}
+
+// Handing off what an app has open (ADR 1)
+
+fn a_page() -> Opening {
+    Opening::Page {
+        address: "https://example.com/".into(),
+        browser: "msedge".into(),
+    }
+}
+
+async fn wait_for_opened(device: &Device, wanted: &Opening) {
+    let wait = async {
+        while !device.platform.opened().contains(wanted) {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    };
+    tokio::time::timeout(TIMEOUT, wait)
+        .await
+        .unwrap_or_else(|_| panic!("{} never opened {wanted:?}", device.name));
+}
+
+fn has_notice(state: &UiState, title: &str, text: &str) -> bool {
+    state
+        .dev_notices
+        .iter()
+        .any(|notice| notice.title.contains(title) && notice.text.contains(text))
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_page_handed_off_opens_on_the_other_pc() {
+    let (mut a, b) = side_by_side().await;
+    let (a_id, b_id) = (a.fingerprint(), b.fingerprint());
+    a.platform.set_open_in("msedge", Found::Open(a_page()));
+    a.request(Request::HandOff {
+        device: a_id,
+        app: "msedge".into(),
+        monitor: Some("fake-0".into()),
+        to: b_id,
+    })
+    .await;
+    wait_for_opened(&b, &a_page()).await;
+    assert!(a.platform.opened().is_empty(), "it stays open where it was");
+}
+
+/// Dragging from another PC's screen to this one's pulls it here.
+#[tokio::test(flavor = "multi_thread")]
+async fn the_pc_whose_canvas_is_used_can_ask_another_to_hand_off() {
+    let (a, mut b) = side_by_side().await;
+    let (a_id, b_id) = (a.fingerprint(), b.fingerprint());
+    a.platform
+        .set_running_apps(vec![window_of("code", "Visual Studio Code", &["fake-0"])]);
+    let project = Opening::Project {
+        folder: r"C:\code\hackerman".into(),
+    };
+    a.platform.set_open_in("code", Found::Open(project.clone()));
+    b.wait_for("the app", |s| on_screen(s, a_id, "code")).await;
+    b.request(Request::HandOff {
+        device: a_id,
+        app: "code".into(),
+        monitor: Some("fake-0".into()),
+        to: b_id,
+    })
+    .await;
+    wait_for_opened(&b, &project).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_pc_that_doesnt_let_others_do_things_with_apps_opens_nothing() {
+    let (mut a, mut b) = side_by_side().await;
+    let (a_id, b_id) = (a.fingerprint(), b.fingerprint());
+    b.set_rule(|rules| rules.app_control = false).await;
+    a.platform.set_open_in("msedge", Found::Open(a_page()));
+    a.request(Request::HandOff {
+        device: a_id,
+        app: "msedge".into(),
+        monitor: None,
+        to: b_id,
+    })
+    .await;
+    b.wait_for("being told why", |s| {
+        has_notice(s, "handed off", "Apps & media")
+    })
+    .await;
+    assert!(b.platform.opened().is_empty());
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_page_that_isnt_a_web_page_is_never_opened() {
+    let (a, mut peer) = device_with_hand_written_peer(FEATURES).await;
+    peer.sender
+        .send(&Message::Open(Opening::Page {
+            address: r#"https://a.com" --gpu-launcher=calc"#.into(),
+            browser: "chrome".into(),
+        }))
+        .await
+        .unwrap();
+    peer.sender
+        .send(&Message::Open(Opening::Folder {
+            folder: r"\\attacker\share".into(),
+        }))
+        .await
+        .unwrap();
+    // Messages arrive in order, so once this has opened, those were turned down.
+    peer.sender.send(&Message::Open(a_page())).await.unwrap();
+    wait_for_opened(&a, &a_page()).await;
+    assert_eq!(a.platform.opened(), [a_page()]);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn what_cant_be_found_is_said_on_the_pc_it_is_on() {
+    let (mut a, b) = side_by_side().await;
+    let (a_id, b_id) = (a.fingerprint(), b.fingerprint());
+    a.request(Request::HandOff {
+        device: a_id,
+        app: "spotify".into(),
+        monitor: None,
+        to: b_id,
+    })
+    .await;
+    a.wait_for("being told", |s| {
+        has_notice(s, "Couldn't hand off", "couldn't tell")
+    })
+    .await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_pc_on_an_older_version_is_said_to_need_updating_for_handing_off() {
+    let (mut a, peer) = device_with_hand_written_peer(FEATURES & !FEATURE_HANDOFF).await;
+    let a_id = a.fingerprint();
+    a.platform.set_open_in("msedge", Found::Open(a_page()));
+    a.request(Request::HandOff {
+        device: a_id,
+        app: "msedge".into(),
+        monitor: None,
+        to: peer.id,
+    })
+    .await;
+    a.wait_for("being told", |s| {
+        has_notice(s, "Couldn't hand off", "0.13.0")
+    })
+    .await;
+}
+
+/// The copy goes in the folder for that, next to anything of the same name, and is opened.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_file_handed_off_is_saved_as_a_copy_and_opened() {
+    let (mut a, b, _, b_desktop) = two_with_desktops().await;
+    let (a_id, b_id) = (a.fingerprint(), b.fingerprint());
+    let handed_off = temp_folder("handed off");
+    b.platform.set_handoff_folder(handed_off.clone());
+    std::fs::write(handed_off.join("report.docx"), "already here").unwrap();
+    let report = temp_folder("a documents").join("report.docx");
+    std::fs::write(&report, "the report").unwrap();
+    a.platform.set_open_in("winword", Found::File(report));
+
+    a.request(Request::HandOff {
+        device: a_id,
+        app: "winword".into(),
+        monitor: None,
+        to: b_id,
+    })
+    .await;
+    let copy = handed_off.join("report (1).docx");
+    let wait = async {
+        while b.platform.opened_files() != [copy.clone()] {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    };
+    tokio::time::timeout(TIMEOUT, wait)
+        .await
+        .expect("the copy opened");
+    assert_eq!(std::fs::read_to_string(&copy).unwrap(), "the report");
+    assert_eq!(
+        std::fs::read_to_string(handed_off.join("report.docx")).unwrap(),
+        "already here"
+    );
+    assert!(
+        std::fs::read_dir(b_desktop).unwrap().next().is_none(),
+        "not on the Desktop"
+    );
+}
+
+// Linked copies of handed-off files (ADR 2)
+
+/// A file on `a` handed off to `b`, both now keeping it the same. Gives the original and copy.
+async fn a_linked_file(a: &mut Device, b: &mut Device, content: &[u8]) -> (PathBuf, PathBuf) {
+    let (a_id, b_id) = (a.fingerprint(), b.fingerprint());
+    let handed_off = temp_folder("linked copies");
+    b.platform.set_handoff_folder(handed_off.clone());
+    let original = temp_folder("originals").join("video.mp4");
+    std::fs::write(&original, content).unwrap();
+    a.platform.set_open_in("vlc", Found::File(original.clone()));
+    a.request(Request::HandOff {
+        device: a_id,
+        app: "vlc".into(),
+        monitor: None,
+        to: b_id,
+    })
+    .await;
+    a.wait_for("the link", |s| s.linked_files.len() == 1).await;
+    b.wait_for("the link", |s| s.linked_files.len() == 1).await;
+    (original, handed_off.join("video.mp4"))
+}
+
+async fn wait_for_content(path: &Path, wanted: &[u8]) {
+    let wait = async {
+        while std::fs::read(path).ok().as_deref() != Some(wanted) {
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    };
+    tokio::time::timeout(TIMEOUT, wait)
+        .await
+        .unwrap_or_else(|_| panic!("{} never had what was expected", path.display()));
+}
+
+/// Big and different everywhere, so it's cut into many pieces.
+fn noise(length: usize, seed: u64) -> Vec<u8> {
+    let mut state = seed;
+    (0..length)
+        .map(|_| {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            state as u8
+        })
+        .collect()
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_handed_off_file_is_kept_the_same_both_ways() {
+    let (mut a, mut b, _, _) = two_with_desktops().await;
+    let content = noise(3 * 1024 * 1024, 1);
+    let (original, copy) = a_linked_file(&mut a, &mut b, &content).await;
+    assert_eq!(std::fs::read(&copy).unwrap(), content);
+
+    // Changed where it came from: a few bytes near the start.
+    let mut changed = content.clone();
+    changed.splice(100..100, *b"edited on alpha");
+    std::fs::write(&original, &changed).unwrap();
+    wait_for_content(&copy, &changed).await;
+
+    // And back the other way.
+    changed.truncate(2 * 1024 * 1024);
+    changed.extend_from_slice(b"edited on bravo");
+    std::fs::write(&copy, &changed).unwrap();
+    wait_for_content(&original, &changed).await;
+}
+
+/// Changed on both before either heard: one version wins on both, and the other is kept.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_file_changed_on_both_keeps_both_versions() {
+    let (mut a, mut b, _, _) = two_with_desktops().await;
+    let (original, copy) = a_linked_file(&mut a, &mut b, b"first").await;
+    let_things_settle().await;
+    std::fs::write(&original, "alpha's").unwrap();
+    std::fs::write(&copy, "bravo's").unwrap();
+
+    let a_wins = hk_core::linked::wins(a.fingerprint(), b.fingerprint());
+    let (winner, loser_file, loser_name) = if a_wins {
+        ("alpha's", &copy, "bravo")
+    } else {
+        ("bravo's", &original, "alpha")
+    };
+    wait_for_content(&original, winner.as_bytes()).await;
+    wait_for_content(&copy, winner.as_bytes()).await;
+    let kept = hk_core::linked::conflicted_copy(loser_file, loser_name);
+    let lost = if a_wins { "bravo's" } else { "alpha's" };
+    wait_for_content(&kept, lost.as_bytes()).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn stopping_a_link_on_one_pc_stops_it_on_both() {
+    let (mut a, mut b, _, _) = two_with_desktops().await;
+    let (original, copy) = a_linked_file(&mut a, &mut b, b"first").await;
+    let id = a.state.linked_files[0].id.clone();
+    a.request(Request::StopLink { id }).await;
+    a.wait_for("no link", |s| s.linked_files.is_empty()).await;
+    b.wait_for("no link", |s| s.linked_files.is_empty()).await;
+    std::fs::write(&original, "changed after").unwrap();
+    tokio::time::sleep(Duration::from_secs(5)).await;
+    assert_eq!(
+        std::fs::read(&copy).unwrap(),
+        b"first",
+        "both stay as they are"
+    );
+}
+
+/// Only a device a file is linked with can ask for it, and only for that file.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_linked_file_is_only_given_to_the_pc_it_is_linked_with() {
+    let (a, peer) = device_with_hand_written_peer(FEATURES).await;
+    let link = ClipVersion {
+        counter: 1,
+        owner: a.fingerprint(),
+    };
+    let request = hk_proto::encode_link_request(&LinkRequest {
+        link,
+        want: LinkWant::Pieces,
+    })
+    .unwrap();
+    let mut stream = peer.blobs.request(&request).await.unwrap();
+    let answer = hk_proto::decode_link_answer(&stream.read_message().await.unwrap()).unwrap();
+    assert!(matches!(answer, LinkAnswer::Refused(_)), "{answer:?}");
+}
+
+/// A program like Word keeps its file open, so the new version waits beside it until then.
+#[cfg(windows)]
+#[tokio::test(flavor = "multi_thread")]
+async fn a_linked_file_that_is_open_is_updated_once_it_is_closed() {
+    use std::os::windows::fs::OpenOptionsExt;
+
+    let (mut a, mut b, _, _) = two_with_desktops().await;
+    let (original, copy) = a_linked_file(&mut a, &mut b, b"first").await;
+    // Others may read it, as Word allows, but not replace it.
+    let open = std::fs::OpenOptions::new()
+        .read(true)
+        .share_mode(1)
+        .open(&copy)
+        .unwrap();
+    std::fs::write(&original, "second").unwrap();
+    b.wait_for("the new version waiting", |s| {
+        s.linked_files.first().is_some_and(|file| file.waiting)
+    })
+    .await;
+    assert_eq!(std::fs::read(&copy).unwrap(), b"first");
+    drop(open);
+    wait_for_content(&copy, b"second").await;
+    b.wait_for("nothing waiting", |s| {
+        s.linked_files.first().is_some_and(|file| !file.waiting)
+    })
+    .await;
 }

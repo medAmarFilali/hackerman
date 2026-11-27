@@ -408,6 +408,8 @@ export function MonitorCanvas({ state }: { state: UiState }) {
           app: app.id,
           action: { moveTo: { from: from.monitor, to: target.monitor } },
         });
+      } else if (!cancelled && target) {
+        send({ type: "handOff", device: from.device, app: app.id, monitor: from.monitor, to: target.device });
       }
     };
     const released = (up: PointerEvent) => finish(up, false);
@@ -418,7 +420,6 @@ export function MonitorCanvas({ state }: { state: UiState }) {
   }
 
   const appDragTarget = appDrag && state.screens.find((screen) => keyOf(screen) === appDrag.over);
-  const appDropAllowed = appDragTarget?.device === appDrag?.from.device;
   const screenBeingViewed = state.screens.find((screen) => keyOf(screen) === viewing);
   const nameOfDevice = (device: Fingerprint) =>
     device === state.me.fingerprint
@@ -515,9 +516,7 @@ export function MonitorCanvas({ state }: { state: UiState }) {
             onResetSize={() => resetSize(screen)}
             onView={() => setViewing(key)}
             sharedWith={sharedChoices(state, screen)}
-            appDrop={
-              appDrag?.over === key ? (appDropAllowed ? "ok" : "blocked") : null
-            }
+            appDrop={appDrag?.over === key}
           />
         );
       })}
@@ -602,11 +601,11 @@ export function MonitorCanvas({ state }: { state: UiState }) {
             role="status"
             className="pointer-events-none absolute inset-x-4 bottom-3 z-30 mx-auto w-fit max-w-full rounded-lg border bg-card px-3 py-1.5 text-center text-xs font-medium"
           >
-            {appDrag.over === null
-              ? `Drop ${appDrag.app.name} on another screen of ${nameOfDevice(appDrag.from.device)}`
-              : appDropAllowed
+            {!appDragTarget
+              ? `Drop ${appDrag.app.name} on another screen to move it, or on another PC's to open what it has open there`
+              : appDragTarget.device === appDrag.from.device
                 ? `Move ${appDrag.app.name} to this screen`
-                : `${appDrag.app.name} can only move between the screens of ${nameOfDevice(appDrag.from.device)}`}
+                : `Open what ${appDrag.app.name} has open on ${nameOfDevice(appDragTarget.device)}`}
           </p>
         </>
       )}
@@ -751,7 +750,7 @@ interface MonitorTileProps {
   /** The PCs this monitor can be showing, if it's plugged into more than one. */
   sharedWith: { device: Fingerprint; name: string }[];
   /** An app is being dragged over this screen, and whether it can go there. */
-  appDrop: "ok" | "blocked" | null;
+  appDrop: boolean;
 }
 
 function MonitorTile({
@@ -808,7 +807,7 @@ function MonitorTile({
       data-drop-device={screen.device}
       data-screen-key={keyOf(screen)}
       data-drop={filesOver ? (cantReceive ? "blocked" : "ok") : undefined}
-      data-app-drop={appDrop ?? undefined}
+      data-app-drop={appDrop ? "ok" : undefined}
       onPointerDown={onPointerDown}
       onPointerMove={onPointerMove}
       onPointerUp={onPointerUp}
@@ -833,8 +832,7 @@ function MonitorTile({
         draggingFiles && !filesOver && !cantReceive && "ring-1 ring-signal/50",
         filesOver && !cantReceive && "ring-2 ring-signal",
         filesOver && cantReceive && "ring-2 ring-destructive/60",
-        appDrop === "ok" && "ring-2 ring-signal",
-        appDrop === "blocked" && "ring-2 ring-destructive/60",
+        appDrop && "ring-2 ring-signal",
       )}
     >
       <div className={cn("frame-inner relative h-full overflow-hidden", away && "opacity-60")}>

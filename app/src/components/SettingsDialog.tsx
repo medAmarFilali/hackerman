@@ -538,6 +538,37 @@ function Files({
         options={NAME_CLASHES}
         onChange={(nameClash) => update({ nameClash })}
       />
+      <div className="flex flex-col gap-2">
+        <div className="flex flex-col gap-0.5">
+          <span className="text-sm font-medium">Files kept the same on two PCs</span>
+          <span className="text-xs text-muted-foreground">
+            {state.linkedFiles.length === 0
+              ? "None yet. Dragging an app with a file open onto another PC's screen on the canvas copies the file there, and then a change on either PC goes to the other."
+              : "A change to one of these on either PC goes to the other. Stopping leaves both copies as they are."}
+          </span>
+        </div>
+        {state.linkedFiles.map((file) => (
+          <div key={file.id} className="flex items-center justify-between gap-3 rounded-md border px-2.5 py-1.5">
+            <div className="flex min-w-0 flex-col">
+              <span title={file.path} className="truncate text-xs font-medium">
+                {file.path.split("\\").pop()}
+              </span>
+              <span className="truncate text-xs text-muted-foreground">
+                With {file.peerName}
+                {file.waiting && " · updated once it's closed here"}
+              </span>
+            </div>
+            <Button
+              size="sm"
+              variant="ghost"
+              aria-label={`Stop keeping ${file.path} the same`}
+              onClick={() => send({ type: "stopLink", id: file.id })}
+            >
+              Stop
+            </Button>
+          </div>
+        ))}
+      </div>
     </>
   );
 }
@@ -613,8 +644,8 @@ function AppsAndMedia({
         onChange={(mediaControl) => update({ mediaControl })}
       />
       <SwitchRow
-        label="Let other PCs bring up and move apps here"
-        description="Clicking an app on the canvas brings it to the front on its PC, and dragging it to another of that PC's screens moves its windows there."
+        label="Let other PCs bring up, move and hand off apps here"
+        description="Clicking an app on the canvas brings it to the front on its PC, and dragging it to another of that PC's screens moves its windows there. Dragging it to another PC's screen opens the same page, folder or file on that PC."
         checked={rules.appControl}
         onChange={(appControl) => update({ appControl })}
       />

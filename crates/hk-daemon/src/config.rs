@@ -10,6 +10,7 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result};
 use hk_core::device::Fingerprint;
 use hk_core::layout::{LayoutDoc, Monitor};
+use hk_core::linked::Link;
 use hk_core::rules::Rules;
 use hk_core::shared_monitors::{MonitorIdentity, Showing};
 use serde::de::DeserializeOwned;
@@ -145,6 +146,15 @@ pub fn load_showing(dir: &Path) -> Result<Showing> {
 
 pub fn save_showing(dir: &Path, showing: &Showing) -> Result<()> {
     save_json(&dir.join("shared-monitors.json"), showing)
+}
+
+/// Handed-off files kept the same as their copies on other devices.
+pub fn load_links(dir: &Path) -> Result<Vec<Link>> {
+    load_json(&dir.join("links.json"))
+}
+
+pub fn save_links(dir: &Path, links: &[Link]) -> Result<()> {
+    save_json(&dir.join("links.json"), &links)
 }
 
 fn load_json<T: DeserializeOwned + Default>(path: &Path) -> Result<T> {

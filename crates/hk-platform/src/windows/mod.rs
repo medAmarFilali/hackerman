@@ -6,6 +6,7 @@ mod clipboard;
 mod cursor;
 mod dev;
 mod displays;
+mod handoff;
 mod hardware;
 mod hook;
 mod inject;
@@ -23,7 +24,7 @@ pub use dev::docker::{
 pub use virtual_files::data_object;
 
 use std::cell::Cell;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, OnceLock};
 use std::time::{Duration, Instant};
 
@@ -31,6 +32,7 @@ use hk_core::apps::{AppAction, MediaCommand, RunningApp};
 use hk_core::clipboard::{ClipboardData, SharedFile};
 use hk_core::dev::{DevReply, DevRequest};
 use hk_core::geometry::Point;
+use hk_core::handoff::{Found, Opening};
 use hk_core::input::InputEvent;
 use hk_core::layout::Monitor;
 use hk_core::screens::ScreenImage;
@@ -386,6 +388,31 @@ impl Platform for NativePlatform {
             Role::Agent => app_windows::run(app, action),
             Role::Helper { .. } => Err(Error::AppWindows("the screen is locked".to_string())),
         }
+    }
+
+    fn what_is_open(&self, app: &str, monitor: Option<&str>) -> Result<Found, String> {
+        match self.role {
+            Role::Agent => handoff::what_is_open(app, monitor),
+            Role::Helper { .. } => Err("the screen is locked".into()),
+        }
+    }
+
+    fn open(&self, opening: &Opening) -> Result<(), String> {
+        match self.role {
+            Role::Agent => handoff::open(opening),
+            Role::Helper { .. } => Err("the screen is locked".into()),
+        }
+    }
+
+    fn open_file(&self, file: &Path) -> Result<(), String> {
+        match self.role {
+            Role::Agent => handoff::open_file(file),
+            Role::Helper { .. } => Err("the screen is locked".into()),
+        }
+    }
+
+    fn handoff_folder(&self) -> Option<PathBuf> {
+        handoff::handoff_folder()
     }
 
     fn rival_programs(&self) -> Vec<String> {

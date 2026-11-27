@@ -32,6 +32,16 @@ at it, whatever else is switched off. On top of that:
   default.
 - It sees the names of the apps open here, and can control what's playing and bring up and move
   apps, unless you turn those off under **Settings > Apps & media**.
+- Under that same setting, it can hand off an app here to another paired computer, which sends
+  that computer the address of the browser tab in front, the folder open in VS Code or File
+  Explorer, or a copy of the file the app has open. It can also hand things off to this
+  computer: web pages and folders are opened, and files are saved under `Documents\Hackerman`
+  and opened, following the settings for receiving files. Only `http` and `https` addresses and
+  folders on this computer's own drives are opened, and a file Windows would run as a program
+  is never opened. This computer decides how to open each thing, never the other one.
+- A handed-off file stays linked: the computer it's linked with can read the latest version of
+  that one file, and changes it sends replace it here, keeping a conflicted copy if both
+  changed. It can't read or change any other file. Either computer can stop the link.
 - It can see what's on the screens only if you turn that on for that computer under
   **Settings > Screens**, which is off by default.
 - It can use developer mode here only if you turn that on for that computer under

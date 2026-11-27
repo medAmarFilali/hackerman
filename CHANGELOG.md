@@ -3,6 +3,26 @@
 Downloads are on the [releases page](https://github.com/medAmarFilali/hackerman/releases).
 Versions before 0.10.0 weren't published.
 
+## 0.13.0
+
+### Added
+
+- **Handing off to another computer.** Dragging an app's icon onto another computer's screen on
+  the canvas opens what it has open there: the page in a browser's tab in front, a VS Code
+  project, a File Explorer folder, or a copy of the file any other app has open. The original
+  stays open. [ADR 1](docs/adr/0001-hand-off-apps-by-reopening.md) says why it works this way.
+- **Files kept the same on two computers.** A handed-off file stays the same on both: a change
+  on either goes to the other once it's saved, sending only the parts that changed. A file open
+  in a program is updated when it's closed, and if both changed, both versions are kept.
+  **Settings > Clipboard & files** lists them, with a button to stop.
+  [ADR 2](docs/adr/0002-linked-copies-of-handed-off-files.md) has the details.
+
+### Known limits
+
+- Finding which file an app has open can miss, and Hackerman then says so.
+- Handing off and keeping files the same have only been tried between simulated computers so
+  far, and reading what's open only on one real computer.
+
 ## 0.12.0
 
 ### Added

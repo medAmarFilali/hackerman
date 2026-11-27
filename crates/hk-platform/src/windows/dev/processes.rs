@@ -149,7 +149,7 @@ fn session_of(pid: u32) -> Option<u32> {
 
 /// Every process this program can see into. Windows keeps some of its own closed to it,
 /// which are left out.
-pub(super) fn snapshot() -> Vec<ProcessInfo> {
+pub(in crate::imp) fn snapshot() -> Vec<ProcessInfo> {
     // SAFETY: only reads.
     let own_pid = unsafe { GetCurrentProcessId() };
     let own_session = session_of(own_pid);

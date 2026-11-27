@@ -11,7 +11,7 @@ use crate::device::Fingerprint;
 /// Identifies one copy action. Higher versions are newer, and the owner breaks
 /// ties so that all devices agree on which is newest. The fields are compared in
 /// the order they're declared here.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub struct ClipVersion {
     /// When it was copied, in milliseconds since 1970, or just past the newest
     /// version seen if that's later. Going by the clock means a copy still counts as

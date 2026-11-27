@@ -3,7 +3,7 @@
 mod disk;
 pub mod docker;
 mod ports;
-mod processes;
+pub(super) mod processes;
 mod tools;
 
 use std::path::PathBuf;

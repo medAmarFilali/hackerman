@@ -172,6 +172,34 @@ async fn receive_loop<P: Platform>(
             Message::MemoryAlert(alert) => {
                 let _ = events.send(Event::PeerMemoryAlert { peer, alert });
             }
+            Message::HandOff { app, monitor, to } => {
+                let _ = events.send(Event::HandOffRequested {
+                    peer,
+                    app,
+                    monitor,
+                    to,
+                });
+            }
+            Message::Open(opening) => {
+                let _ = events.send(Event::OpenRequested { peer, opening });
+            }
+            Message::LinkShared { link, version } => {
+                let _ = events.send(Event::PeerLinkShared {
+                    peer,
+                    link,
+                    version,
+                });
+            }
+            Message::LinkChanged { link, version } => {
+                let _ = events.send(Event::PeerLinkChanged {
+                    peer,
+                    link,
+                    version,
+                });
+            }
+            Message::LinkEnded { link } => {
+                let _ = events.send(Event::PeerLinkEnded { peer, link });
+            }
         }
     }
 }

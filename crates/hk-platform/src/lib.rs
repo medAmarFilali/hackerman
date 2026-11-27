@@ -13,13 +13,14 @@ pub mod fake;
 mod imp;
 
 use std::io::Read;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use hk_core::apps::{AppAction, MediaCommand, RunningApp};
 use hk_core::clipboard::{ClipboardData, SharedFile};
 use hk_core::dev::{DevReply, DevRequest};
 use hk_core::geometry::Point;
+use hk_core::handoff::{Found, Opening};
 use hk_core::input::InputEvent;
 use hk_core::layout::Monitor;
 use hk_core::screens::ScreenImage;
@@ -158,6 +159,27 @@ pub trait Platform: Clone + Send + Sync + 'static {
         DevReply::Refused {
             reason: "developer mode only works on Windows so far".into(),
         }
+    }
+
+    /// What this app's frontmost window on that monitor, or anywhere, has open, to hand it off to
+    /// another computer. May wait on the app.
+    fn what_is_open(&self, _app: &str, _monitor: Option<&str>) -> Result<Found, String> {
+        Err("handing off only works on Windows so far".into())
+    }
+
+    /// Opens what another computer handed off. May wait on other programs.
+    fn open(&self, _opening: &Opening) -> Result<(), String> {
+        Err("handing off only works on Windows so far".into())
+    }
+
+    /// Opens a handed-off file with its usual program, unless it would run as a program itself.
+    fn open_file(&self, _file: &Path) -> Result<(), String> {
+        Err("handing off only works on Windows so far".into())
+    }
+
+    /// Where handed-off files are saved.
+    fn handoff_folder(&self) -> Option<PathBuf> {
+        None
     }
 }
 

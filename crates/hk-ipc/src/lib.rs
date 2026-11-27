@@ -101,6 +101,18 @@ pub enum Request {
         app: String,
         action: AppAction,
     },
+    /// Hand off what an app on `device` has open, in its frontmost window on that monitor, to
+    /// the device `to`, which opens it.
+    HandOff {
+        device: Fingerprint,
+        app: String,
+        monitor: Option<String>,
+        to: Fingerprint,
+    },
+    /// Stop keeping a handed-off file the same as its copy on another device. Both stay.
+    StopLink {
+        id: String,
+    },
     /// Whether a device can see this device's screens.
     SetScreensAllowed {
         device: Fingerprint,
@@ -244,8 +256,22 @@ pub struct UiState {
     /// Other programs running here that share the keyboard and mouse too, like "Input
     /// Director". They can get in each other's way.
     pub rival_programs: Vec<String>,
-    /// The latest things to tell the user about developer mode, oldest first.
+    /// The latest things to tell the user, oldest first: from developer mode, and about handing
+    /// off.
     pub dev_notices: Vec<DevNotice>,
+    /// Handed-off files here kept the same as a copy on another device.
+    pub linked_files: Vec<LinkedFileView>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LinkedFileView {
+    /// For [`Request::StopLink`].
+    pub id: String,
+    pub path: String,
+    pub peer_name: String,
+    /// A new version from the other device waits for a program here to close the file.
+    pub waiting: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -572,8 +598,16 @@ mod tests {
                 title: "Secondary used developer mode here".into(),
                 text: "Stopped Next.js (site)".into(),
             }],
+            linked_files: vec![LinkedFileView {
+                id: "1-ab".into(),
+                path: r"C:\Users\one\Documents\Hackerman\report.docx".into(),
+                peer_name: "MAIN".into(),
+                waiting: true,
+            }],
         };
         let json = serde_json::to_value(&state).unwrap();
+        assert_eq!(json["linkedFiles"][0]["peerName"], "MAIN");
+        assert_eq!(json["linkedFiles"][0]["waiting"], true);
         assert_eq!(json["devices"][0]["developerAllowed"], true);
         assert_eq!(json["devices"][0]["hasDeveloperMode"], true);
         assert_eq!(json["devNotices"][0]["text"], "Stopped Next.js (site)");
