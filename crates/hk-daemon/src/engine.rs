@@ -40,9 +40,9 @@ use hk_net::{
 use hk_platform::{Capture, FileSource, Platform};
 use hk_proto::{
     ClipboardBlob, FEATURE_APP_ACTIONS, FEATURE_APPS, FEATURE_DEVELOPER, FEATURE_FILES,
-    FEATURE_HANDOFF, FEATURE_MEDIA, FEATURE_SCREENS, FEATURE_SEND_FILES, FEATURE_SHARED_MONITORS,
-    FEATURES, LinkAnswer, LinkRequest, Message, PROTOCOL_VERSION, ScreenAnswer, ScreenRequest,
-    TransferUpdate,
+    FEATURE_HANDOFF, FEATURE_KEEP_MOVING, FEATURE_MEDIA, FEATURE_SCREENS, FEATURE_SEND_FILES,
+    FEATURE_SHARED_MONITORS, FEATURES, LinkAnswer, LinkRequest, Message, PROTOCOL_VERSION,
+    ScreenAnswer, ScreenRequest, TransferUpdate,
 };
 use tokio::runtime::Handle;
 use tokio::sync::mpsc::{self, UnboundedReceiver, UnboundedSender};
@@ -381,6 +381,13 @@ pub enum Event {
     },
     /// A media shortcut was pressed on this device's keyboard.
     MediaShortcut(MediaCommand),
+    /// Ctrl+Shift+B was pressed here.
+    KeepMoving(bool),
+    /// Ctrl+Shift+B was pressed on another device, at this time.
+    PeerKeepMoving {
+        on: bool,
+        changed_at: u64,
+    },
     /// A device wants something done with an app's windows here.
     AppActionRequested {
         peer: Fingerprint,
@@ -561,6 +568,8 @@ struct Engine<P: Platform> {
     watching: HashMap<ClipVersion, Watching>,
     /// Files handed off from here, until the other device says it has them.
     handing_off: HashMap<ClipVersion, (Fingerprint, PathBuf)>,
+    /// When Ctrl+Shift+B was last pressed on any device, in milliseconds since 1970.
+    keep_moving_changed_at: u64,
     // These keep input capture and clipboard watching running.
     capture: Option<Capture>,
     _clipboard_watcher: Option<Capture>,
@@ -723,6 +732,7 @@ pub async fn run<P: Platform>(options: Options, platform: P) -> Result<()> {
         linked,
         watching: HashMap::new(),
         handing_off: HashMap::new(),
+        keep_moving_changed_at: 0,
         capture,
         _clipboard_watcher: clipboard_watcher,
     };
@@ -941,6 +951,11 @@ impl<P: Platform> Engine<P> {
                 seconds = since_last.as_secs(),
                 "the agent was held up, or this computer was asleep"
             );
+        }
+        // While another computer moves this one's cursor, nudging it would get in the way, and
+        // that one keeps this one active.
+        if self.settings.enabled && self.controlled_by.is_none() {
+            self.shared.nudge_while_away();
         }
         self.read_apps();
         self.forget_old_watchers();
@@ -1167,6 +1182,26 @@ impl<P: Platform> Engine<P> {
             Event::MediaShortcut(command) => {
                 if let Some((device, app)) = self.media_target() {
                     self.send_media_command(device, app, command);
+                }
+            }
+            Event::KeepMoving(on) => {
+                tracing::info!(on, "keeping every device active, for Ctrl+Shift+B");
+                self.keep_moving_changed_at = SystemTime::now()
+                    .duration_since(UNIX_EPOCH)
+                    .map_or(0, |since| since.as_millis() as u64);
+                self.broadcast_to(
+                    FEATURE_KEEP_MOVING,
+                    &Message::KeepMoving {
+                        on,
+                        changed_at: self.keep_moving_changed_at,
+                    },
+                );
+            }
+            Event::PeerKeepMoving { on, changed_at } => {
+                if changed_at > self.keep_moving_changed_at {
+                    tracing::info!(on, "keeping this device active, for Ctrl+Shift+B elsewhere");
+                    self.keep_moving_changed_at = changed_at;
+                    self.shared.switcher().set_keep_moving(on);
                 }
             }
             Event::AppActionRequested { peer, app, action } => {
@@ -3412,6 +3447,16 @@ impl<P: Platform> Engine<P> {
             let _ = session
                 .outgoing
                 .send(Message::Showing(self.showing.clone()));
+        }
+        // Whichever was pressed last wins, on both.
+        if features & FEATURE_KEEP_MOVING != 0
+            && self.keep_moving_changed_at > 0
+            && let Some(session) = self.sessions.get(&peer)
+        {
+            let _ = session.outgoing.send(Message::KeepMoving {
+                on: self.shared.switcher().keep_moving(),
+                changed_at: self.keep_moving_changed_at,
+            });
         }
         self.rebuild();
     }
