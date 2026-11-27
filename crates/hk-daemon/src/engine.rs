@@ -8,7 +8,7 @@
 
 use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, PoisonError};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -18,18 +18,20 @@ use hk_core::apps::{self, AppAction, MAX_ICON_BYTES, MAX_ICONS, MediaCommand, Ru
 use hk_core::clipboard::{ClipVersion, ClipboardData, MAX_SHARED_FILES, SharedFile};
 use hk_core::dev::{DevReply, DevRequest, MemoryAlert, MemoryWatch, Program};
 use hk_core::device::Fingerprint;
+use hk_core::handoff::{Found, Opening};
 use hk_core::layout::{DeviceMonitors, LayoutDoc, Monitor, Placement, Topology};
-use hk_core::rules::ReceiveFiles;
+use hk_core::linked::{self, FileVersion, Incoming};
 use hk_core::rules::Rules;
+use hk_core::rules::{NameClash, ReceiveFiles};
 use hk_core::shared_monitors::{
     self, MAX_HARDWARE_LENGTH, MonitorIdentity, SharedMonitor, Showing,
 };
 use hk_core::switcher::Switcher;
 use hk_ipc::{
     AppView, ControlView, DevAnswer, DevNotice, DeviceStatus, DeviceView, FromAgent,
-    IncomingFilesView, IpcConnection, IpcListener, PairingStage, PairingView, PictureAnswer,
-    Request, ScreenAsk, ScreenPicture, ScreenView, SharedScreen, ThisDevice, TransferStage,
-    TransferView, UiState,
+    IncomingFilesView, IpcConnection, IpcListener, LinkedFileView, PairingStage, PairingView,
+    PictureAnswer, Request, ScreenAsk, ScreenPicture, ScreenView, SharedScreen, ThisDevice,
+    TransferStage, TransferView, UiState,
 };
 use hk_net::{
     Accepted, BlobChannel, DataWriter, Discovery, DiscoveryEvent, Endpoint, FoundDevice, Identity,
@@ -38,8 +40,9 @@ use hk_net::{
 use hk_platform::{Capture, FileSource, Platform};
 use hk_proto::{
     ClipboardBlob, FEATURE_APP_ACTIONS, FEATURE_APPS, FEATURE_DEVELOPER, FEATURE_FILES,
-    FEATURE_MEDIA, FEATURE_SCREENS, FEATURE_SEND_FILES, FEATURE_SHARED_MONITORS, FEATURES, Message,
-    PROTOCOL_VERSION, ScreenAnswer, ScreenRequest, TransferUpdate,
+    FEATURE_HANDOFF, FEATURE_MEDIA, FEATURE_SCREENS, FEATURE_SEND_FILES, FEATURE_SHARED_MONITORS,
+    FEATURES, LinkAnswer, LinkRequest, Message, PROTOCOL_VERSION, ScreenAnswer, ScreenRequest,
+    TransferUpdate,
 };
 use tokio::runtime::Handle;
 use tokio::sync::mpsc::{self, UnboundedReceiver, UnboundedSender};
@@ -52,6 +55,7 @@ use crate::dev;
 use crate::files::{
     self, Links, LocalFiles, OfferedFiles, RemoteFiles, SaveError, TransferControl,
 };
+use crate::linked_files;
 use crate::pairing::{self, Paired};
 use crate::screens;
 use crate::session;
@@ -94,6 +98,14 @@ const RIVALS_CHECK_EVERY_N_TICKS: u64 = 30;
 const HELD_UP_AFTER: Duration = Duration::from_secs(5);
 /// How long a player takes to change what it says it's doing, after being asked to.
 const MEDIA_SETTLES: Duration = Duration::from_millis(300);
+/// A linked file that changed is read once it has stayed the same this long, so the program
+/// saving it has finished.
+const LINKED_FILE_SETTLES: Duration = Duration::from_secs(2);
+/// How often the other device is told again of a change here it hasn't taken yet.
+const TELL_LINK_CHANGE_EVERY: Duration = Duration::from_secs(30);
+/// Why another device can't bring up, move or hand off apps here.
+const APPS_NOT_ALLOWED: &str =
+    "Settings, Apps & media doesn't let other PCs bring up, move or hand off apps here.";
 /// A device that asked for a picture this recently counts as looking at this one's screens. It's
 /// long enough for pictures that come a few seconds apart.
 const WATCHING_FOR: Duration = Duration::from_secs(10);
@@ -171,10 +183,65 @@ pub enum Event {
         peer: Fingerprint,
         alert: MemoryAlert,
     },
-    /// Something to tell the user about developer mode.
-    DevNotice {
+    /// Something to tell the user, as a notification.
+    Notice {
         title: String,
         text: String,
+    },
+    /// A device asks this one to hand off what one of its apps has open.
+    HandOffRequested {
+        peer: Fingerprint,
+        app: String,
+        monitor: Option<String>,
+        to: Fingerprint,
+    },
+    /// What an app here has open, found for handing off to `to`.
+    HandOffFound {
+        app: String,
+        to: Fingerprint,
+        found: Result<Found, String>,
+    },
+    /// A linked file here was read after it changed.
+    LinkRead {
+        link: ClipVersion,
+        read: Result<FileVersion, String>,
+    },
+    /// A linked file here was given the other device's version, or that failed.
+    LinkFetched {
+        link: ClipVersion,
+        result: Result<linked_files::Fetched, String>,
+    },
+    /// A handed-off file was saved here and read, which makes its link.
+    LinkMade {
+        peer: Fingerprint,
+        link: ClipVersion,
+        path: PathBuf,
+        read: Result<FileVersion, String>,
+    },
+    PeerLinkShared {
+        peer: Fingerprint,
+        link: ClipVersion,
+        version: FileVersion,
+    },
+    PeerLinkChanged {
+        peer: Fingerprint,
+        link: ClipVersion,
+        version: FileVersion,
+    },
+    PeerLinkEnded {
+        peer: Fingerprint,
+        link: ClipVersion,
+    },
+    /// Another device wants this device's copy of a linked file.
+    LinkRequested {
+        peer: Fingerprint,
+        request: LinkRequest,
+        writer: DataWriter,
+    },
+    /// A device handed off something to open here.
+    OpenRequested {
+        peer: Fingerprint,
+        opening: Opening,
     },
     /// A request from another device has been answered.
     PeerDevFinished {
@@ -258,11 +325,12 @@ pub enum Event {
         peer: Fingerprint,
         id: ClipVersion,
         files: Vec<SharedFile>,
+        handed_off: bool,
     },
     /// Files have finished being saved here, for better or worse.
     FilesSaved {
         id: ClipVersion,
-        result: Result<(), SaveError>,
+        result: Result<Vec<PathBuf>, SaveError>,
     },
     /// News of files sent from here.
     TransferUpdated {
@@ -360,13 +428,43 @@ struct Transfer {
     control: Option<Arc<TransferControl>>,
     /// When there was last any news of it, or the connection for it was last there.
     last_heard: Instant,
+    /// A file handed off with an app: saved in the folder for that, and opened.
+    handed_off: bool,
 }
 
 /// Files a device wants to send here, while the user decides.
+/// How a linked file here is being looked after.
+#[derive(Default)]
+struct Watching {
+    /// Its size and time of change when last looked at.
+    seen: Option<(u64, SystemTime)>,
+    /// When it last changed, until it has been read since.
+    changed_at: Option<Instant>,
+    /// How many looks in a row it wasn't there.
+    missing: u8,
+    /// It's being read, or the other device's version fetched.
+    busy: bool,
+    /// A version here the other device doesn't have yet, and when it was last told.
+    unshared: Option<FileVersion>,
+    told_at: Option<Instant>,
+    /// The newest version the other device said it has, while this one was busy.
+    offered: Option<FileVersion>,
+    /// The other device's version, waiting beside it for a program here to close it.
+    waiting: Option<(PathBuf, FileVersion)>,
+}
+
 struct IncomingFiles {
     id: ClipVersion,
     peer: Fingerprint,
     files: Vec<SharedFile>,
+    handed_off: bool,
+}
+
+fn file_name(path: &Path) -> String {
+    path.file_name().map_or_else(
+        || path.display().to_string(),
+        |name| name.to_string_lossy().into_owned(),
+    )
 }
 
 fn transfer_key(id: ClipVersion) -> String {
@@ -458,6 +556,11 @@ struct Engine<P: Platform> {
     next_notice: u64,
     memory_watch: MemoryWatch,
     checking_memory: bool,
+    /// Handed-off files here kept the same as copies on other devices (ADR 2).
+    linked: Vec<linked::Link>,
+    watching: HashMap<ClipVersion, Watching>,
+    /// Files handed off from here, until the other device says it has them.
+    handing_off: HashMap<ClipVersion, (Fingerprint, PathBuf)>,
     // These keep input capture and clipboard watching running.
     capture: Option<Capture>,
     _clipboard_watcher: Option<Capture>,
@@ -483,6 +586,7 @@ pub async fn run<P: Platform>(options: Options, platform: P) -> Result<()> {
         .map(|device| (device.fingerprint, device))
         .collect();
     let layout = config::load_layout(&dir)?;
+    let linked = config::load_links(&dir)?;
     // Only a matter of how the canvas looks, so a damaged file isn't worth stopping for.
     let showing = config::load_showing(&dir).unwrap_or_else(|error| {
         tracing::warn!("{error:#}");
@@ -616,6 +720,9 @@ pub async fn run<P: Platform>(options: Options, platform: P) -> Result<()> {
         next_notice: 0,
         memory_watch: MemoryWatch::default(),
         checking_memory: false,
+        linked,
+        watching: HashMap::new(),
+        handing_off: HashMap::new(),
         capture,
         _clipboard_watcher: clipboard_watcher,
     };
@@ -839,6 +946,7 @@ impl<P: Platform> Engine<P> {
         self.forget_old_watchers();
         self.give_up_on_dev_requests();
         self.check_memory();
+        self.check_linked_files();
         let monitors = self.shared.platform.monitors();
         if monitors != self.monitors {
             tracing::info!(count = monitors.len(), "monitors changed");
@@ -962,7 +1070,12 @@ impl<P: Platform> Engine<P> {
                 }
             }
             Event::FilesListed { id, files, paths } => self.on_files_listed(id, files, paths),
-            Event::FilesOffered { peer, id, files } => self.on_files_offered(peer, id, files),
+            Event::FilesOffered {
+                peer,
+                id,
+                files,
+                handed_off,
+            } => self.on_files_offered(peer, id, files, handed_off),
             Event::FilesSaved { id, result } => self.on_files_saved(id, result),
             Event::TransferUpdated { peer, id, update } => {
                 self.on_transfer_updated(peer, id, update);
@@ -995,7 +1108,53 @@ impl<P: Platform> Engine<P> {
                 let title = format!("Memory on {}", self.device_name(peer));
                 self.add_notice(title, dev::alert_text(&alert));
             }
-            Event::DevNotice { title, text } => self.add_notice(title, text),
+            Event::Notice { title, text } => self.add_notice(title, text),
+            Event::HandOffRequested {
+                peer,
+                app,
+                monitor,
+                to,
+            } => self.on_hand_off_requested(peer, app, monitor, to),
+            Event::HandOffFound { app, to, found } => self.on_hand_off_found(&app, to, found),
+            Event::OpenRequested { peer, opening } => self.on_open_requested(peer, opening),
+            Event::LinkRead { link, read } => self.on_link_read(link, read),
+            Event::LinkFetched { link, result } => self.on_link_fetched(link, result),
+            Event::LinkMade {
+                peer,
+                link,
+                path,
+                read,
+            } => self.on_link_made(peer, link, path, read),
+            Event::PeerLinkShared {
+                peer,
+                link,
+                version,
+            } => self.on_peer_link_shared(peer, link, version),
+            Event::PeerLinkChanged {
+                peer,
+                link,
+                version,
+            } => self.on_peer_link_changed(peer, link, version),
+            Event::PeerLinkEnded { peer, link } => {
+                if let Some(at) = self
+                    .linked
+                    .iter()
+                    .position(|l| l.id == link && l.peer == peer)
+                {
+                    let ended = self.end_link(at, false);
+                    let title = format!("{} isn't kept the same any more", file_name(&ended.path));
+                    let text = format!(
+                        "{} stopped keeping it the same as its copy there.",
+                        self.device_name(peer)
+                    );
+                    self.add_notice(title, text);
+                }
+            }
+            Event::LinkRequested {
+                peer,
+                request,
+                writer,
+            } => self.on_link_requested(peer, request, writer),
             Event::PeerDevFinished { peer } => {
                 if let Some(answering) = self.dev_answering.get_mut(&peer) {
                     *answering = answering.saturating_sub(1);
@@ -1057,6 +1216,9 @@ impl<P: Platform> Engine<P> {
                 self.trust.remove(device);
                 self.paired.remove(&device);
                 self.save_devices();
+                while let Some(at) = self.linked.iter().position(|link| link.peer == device) {
+                    self.end_link(at, false);
+                }
                 self.end_session(device);
                 self.rebuild();
             }
@@ -1068,7 +1230,9 @@ impl<P: Platform> Engine<P> {
                 self.notify();
             }
             Request::SetEnabled { enabled } => self.set_enabled(enabled),
-            Request::SendFiles { device, paths } => self.send_files(device, paths),
+            Request::SendFiles { device, paths } => {
+                self.send_files(device, paths, false);
+            }
             Request::CancelTransfer { id } => self.cancel_transfer(&id),
             Request::DismissTransfer { id } => {
                 self.transfers
@@ -1094,6 +1258,21 @@ impl<P: Platform> Engine<P> {
                 app,
                 action,
             } => self.send_app_action(device, app, action),
+            Request::HandOff {
+                device,
+                app,
+                monitor,
+                to,
+            } => self.hand_off(device, app, monitor, to),
+            Request::StopLink { id } => {
+                if let Some(at) = self
+                    .linked
+                    .iter()
+                    .position(|link| transfer_key(link.id) == id)
+                {
+                    self.end_link(at, true);
+                }
+            }
             Request::SetScreensAllowed { device, allowed } => {
                 self.set_screens_allowed(device, allowed);
             }
@@ -1671,7 +1850,7 @@ impl<P: Platform> Engine<P> {
                     reason: "it went wrong".into(),
                 });
             if acts && let Some(text) = dev::notice_text(&reply) {
-                let _ = events.send(Event::DevNotice {
+                let _ = events.send(Event::Notice {
                     title: format!("{there} used developer mode here"),
                     text,
                 });
@@ -1836,6 +2015,476 @@ impl<P: Platform> Engine<P> {
         });
     }
 
+    // Handing off what an app has open to another device (ADR 1)
+
+    /// From this device's window: the app is on `device`, and what it has open goes to `to`.
+    fn hand_off(
+        &mut self,
+        device: Fingerprint,
+        app: String,
+        monitor: Option<String>,
+        to: Fingerprint,
+    ) {
+        tracing::info!(%device, app, %to, "handing off an app");
+        if device == to || !self.settings.enabled {
+            return;
+        }
+        if device == self.me {
+            return self.start_hand_off(app, monitor, to);
+        }
+        match self.handoff_session(device) {
+            Ok(session) => {
+                let _ = session.outgoing.send(Message::HandOff { app, monitor, to });
+            }
+            Err(reason) => self.add_notice(format!("Couldn't hand off {app}"), reason),
+        }
+    }
+
+    /// A connected device that can take part in handing off, or why it can't.
+    fn handoff_session(&self, device: Fingerprint) -> Result<&Session, String> {
+        let name = self.device_name(device);
+        let session = self
+            .sessions
+            .get(&device)
+            .filter(|session| session.up)
+            .ok_or_else(|| format!("{name} isn't connected"))?;
+        if session.features & FEATURE_HANDOFF == 0 {
+            return Err(format!("{name} needs Hackerman 0.13.0 or newer for this"));
+        }
+        Ok(session)
+    }
+
+    fn app_name(&self, app: &str) -> String {
+        let known = self.local_apps.iter().find(|known| known.id == app);
+        known.map_or_else(|| app.to_string(), |known| known.name.clone())
+    }
+
+    fn on_hand_off_requested(
+        &mut self,
+        peer: Fingerprint,
+        app: String,
+        monitor: Option<String>,
+        to: Fingerprint,
+    ) {
+        let is_open_here = self.local_apps.iter().any(|known| known.id == app);
+        if !self.settings.enabled
+            || !is_open_here
+            || monitor.as_ref().is_some_and(|m| m.len() > 1024)
+        {
+            tracing::info!(%peer, app, "refused to hand off an app");
+            return;
+        }
+        if !self.settings.rules.app_control {
+            let title = format!(
+                "{} tried to hand off {}",
+                self.device_name(peer),
+                self.app_name(&app)
+            );
+            return self.add_notice(title, APPS_NOT_ALLOWED.to_string());
+        }
+        tracing::info!(%peer, app, %to, "another device is handing off an app here");
+        self.start_hand_off(app, monitor, to);
+    }
+
+    /// Finding what an app has open waits on it, so it's done off to the side.
+    fn start_hand_off(&mut self, app: String, monitor: Option<String>, to: Fingerprint) {
+        if let Err(reason) = self.handoff_session(to) {
+            return self.add_notice(format!("Couldn't hand off {}", self.app_name(&app)), reason);
+        }
+        let platform = self.shared.platform.clone();
+        let events = self.events.clone();
+        tokio::task::spawn_blocking(move || {
+            let found = platform.what_is_open(&app, monitor.as_deref());
+            let _ = events.send(Event::HandOffFound { app, to, found });
+        });
+    }
+
+    fn on_hand_off_found(&mut self, app: &str, to: Fingerprint, found: Result<Found, String>) {
+        let title = format!("Couldn't hand off {}", self.app_name(app));
+        match found {
+            Err(reason) => self.add_notice(title, reason),
+            Ok(Found::File(file)) => {
+                let id = self.send_files(to, vec![file.display().to_string()], true);
+                self.handing_off.insert(id, (to, file));
+            }
+            Ok(Found::Open(opening)) => match self.handoff_session(to) {
+                Ok(session) => {
+                    let _ = session.outgoing.send(Message::Open(opening));
+                }
+                Err(reason) => self.add_notice(title, reason),
+            },
+        }
+    }
+
+    fn on_open_requested(&mut self, peer: Fingerprint, opening: Opening) {
+        let from = self.device_name(peer);
+        if !self.settings.enabled || !opening.is_safe() {
+            tracing::info!(%peer, "refused to open what another device handed off");
+            return;
+        }
+        if !self.settings.rules.app_control {
+            let title = format!("{from} handed off something to open here");
+            return self.add_notice(title, APPS_NOT_ALLOWED.to_string());
+        }
+        // What it is stays out of the log, as with the clipboard.
+        tracing::info!(%peer, "opening what another device handed off");
+        let platform = self.shared.platform.clone();
+        let events = self.events.clone();
+        tokio::task::spawn_blocking(move || {
+            if let Err(text) = platform.open(&opening) {
+                let title = format!("Couldn't open what {from} handed off");
+                let _ = events.send(Event::Notice { title, text });
+            }
+        });
+    }
+
+    // Linked copies of handed-off files (ADR 2)
+
+    fn save_links(&self) {
+        if let Err(error) = config::save_links(&self.options.config_dir, &self.linked) {
+            tracing::warn!(%error, "can't save the linked files");
+        }
+    }
+
+    /// Stops keeping a file the same as its copy. Both stay as they are.
+    fn end_link(&mut self, at: usize, tell_peer: bool) -> linked::Link {
+        let link = self.linked.remove(at);
+        if let Some(Watching {
+            waiting: Some((new, _)),
+            ..
+        }) = self.watching.remove(&link.id)
+        {
+            let _ = std::fs::remove_file(new);
+        }
+        if tell_peer && let Ok(session) = self.handoff_session(link.peer) {
+            let _ = session.outgoing.send(Message::LinkEnded { link: link.id });
+        }
+        tracing::info!(peer = %link.peer, "stopped keeping a file the same as its copy");
+        self.save_links();
+        self.notify();
+        link
+    }
+
+    /// Looks at each linked file: whether it changed, is gone, or can now be updated.
+    fn check_linked_files(&mut self) {
+        let now = Instant::now();
+        let mut gone = Vec::new();
+        for at in 0..self.linked.len() {
+            let link = self.linked[at].clone();
+            let watching = self.watching.entry(link.id).or_default();
+            if watching.busy {
+                continue;
+            }
+            if let Some((new, version)) = watching.waiting.clone() {
+                // A program here had it open. It may have closed it since.
+                if std::fs::rename(&new, &link.path).is_ok() {
+                    watching.waiting = None;
+                    let _ = self.events.send(Event::LinkFetched {
+                        link: link.id,
+                        result: Ok(linked_files::Fetched::Done(version)),
+                    });
+                }
+                continue;
+            }
+            let Ok(metadata) = std::fs::metadata(&link.path) else {
+                // Some programs save by replacing the file, so it can be gone for a moment.
+                watching.missing += 1;
+                if watching.missing >= 2 {
+                    gone.push(link.id);
+                }
+                continue;
+            };
+            watching.missing = 0;
+            let seen = (
+                metadata.len(),
+                metadata.modified().unwrap_or(SystemTime::UNIX_EPOCH),
+            );
+            if watching.seen != Some(seen) {
+                watching.seen = Some(seen);
+                watching.changed_at = Some(now);
+            }
+            if watching
+                .changed_at
+                .is_some_and(|at| now - at >= LINKED_FILE_SETTLES)
+            {
+                watching.changed_at = None;
+                watching.busy = true;
+                let events = self.events.clone();
+                tokio::task::spawn_blocking(move || {
+                    let read = linked_files::version_of(&link.path)
+                        .map(|(version, _)| version)
+                        .map_err(|error| error.to_string());
+                    let _ = events.send(Event::LinkRead {
+                        link: link.id,
+                        read,
+                    });
+                });
+                continue;
+            }
+            let due = watching
+                .told_at
+                .is_none_or(|told| now - told >= TELL_LINK_CHANGE_EVERY);
+            if let Some(version) = watching.unshared
+                && due
+                && let Ok(session) = self.handoff_session(link.peer)
+            {
+                let _ = session.outgoing.send(Message::LinkChanged {
+                    link: link.id,
+                    version,
+                });
+                if let Some(watching) = self.watching.get_mut(&link.id) {
+                    watching.told_at = Some(now);
+                }
+            }
+        }
+        for id in gone {
+            if let Some(at) = self.linked.iter().position(|link| link.id == id) {
+                let ended = self.end_link(at, true);
+                let title = format!("{} isn't kept the same any more", file_name(&ended.path));
+                self.add_notice(
+                    title,
+                    "It was moved or deleted here. The copy on the other PC stays.".into(),
+                );
+            }
+        }
+    }
+
+    fn on_link_read(&mut self, id: ClipVersion, read: Result<FileVersion, String>) {
+        let shared = self
+            .linked
+            .iter()
+            .find(|link| link.id == id)
+            .map(|link| link.shared);
+        let Some(watching) = self.watching.get_mut(&id) else {
+            return;
+        };
+        watching.busy = false;
+        match (read, shared) {
+            (Ok(version), Some(shared)) => {
+                watching.unshared = (version != shared).then_some(version);
+                watching.told_at = None;
+            }
+            (Err(error), _) => tracing::warn!(error, "can't read a linked file"),
+            (Ok(_), None) => {}
+        }
+        self.take_up_offer(id);
+    }
+
+    /// Deals with a version the other device sent while this one was busy with the file.
+    fn take_up_offer(&mut self, id: ClipVersion) {
+        let peer = self
+            .linked
+            .iter()
+            .find(|link| link.id == id)
+            .map(|link| link.peer);
+        let offered = self
+            .watching
+            .get_mut(&id)
+            .and_then(|watching| watching.offered.take());
+        if let (Some(peer), Some(version)) = (peer, offered) {
+            self.on_peer_link_changed(peer, id, version);
+        }
+    }
+
+    fn on_link_made(
+        &mut self,
+        peer: Fingerprint,
+        id: ClipVersion,
+        path: PathBuf,
+        read: Result<FileVersion, String>,
+    ) {
+        let version = match read {
+            Ok(version) => version,
+            Err(error) => return tracing::warn!(error, "can't read a handed-off file to link it"),
+        };
+        tracing::info!(%peer, "keeping a handed-off file the same as the original");
+        self.linked.push(linked::Link {
+            id,
+            peer,
+            path,
+            shared: version,
+        });
+        self.save_links();
+        if let Ok(session) = self.handoff_session(peer) {
+            let _ = session
+                .outgoing
+                .send(Message::LinkShared { link: id, version });
+        }
+        self.notify();
+    }
+
+    fn on_peer_link_shared(&mut self, peer: Fingerprint, id: ClipVersion, version: FileVersion) {
+        if let Some(link) = self
+            .linked
+            .iter_mut()
+            .find(|link| link.id == id && link.peer == peer)
+        {
+            link.shared = version;
+            if let Some(watching) = self.watching.get_mut(&id)
+                && watching.unshared == Some(version)
+            {
+                watching.unshared = None;
+            }
+            self.save_links();
+            return;
+        }
+        // The other device saved a file handed off from here.
+        if self.handing_off.get(&id).is_some_and(|(to, _)| *to == peer)
+            && let Some((_, path)) = self.handing_off.remove(&id)
+        {
+            tracing::info!(%peer, "keeping a file handed off from here the same as its copy");
+            self.linked.push(linked::Link {
+                id,
+                peer,
+                path,
+                shared: version,
+            });
+            self.save_links();
+            self.notify();
+        }
+    }
+
+    fn on_peer_link_changed(&mut self, peer: Fingerprint, id: ClipVersion, version: FileVersion) {
+        let Some(at) = self
+            .linked
+            .iter()
+            .position(|link| link.id == id && link.peer == peer)
+        else {
+            return;
+        };
+        let watching = self.watching.entry(id).or_default();
+        // Until a change here has been read, it isn't known whether one was made. It's dealt
+        // with once that's done.
+        if watching.busy
+            || watching.seen.is_none()
+            || watching.changed_at.is_some()
+            || watching.waiting.is_some()
+        {
+            watching.offered = Some(version);
+            return;
+        }
+        let link = self.linked[at].clone();
+        let mine = watching.unshared.unwrap_or(link.shared);
+        match linked::incoming(link.shared, mine, version, linked::wins(peer, self.me)) {
+            Incoming::Same => {
+                watching.unshared = None;
+                self.linked[at].shared = version;
+                self.save_links();
+                if let Ok(session) = self.handoff_session(peer) {
+                    let _ = session
+                        .outgoing
+                        .send(Message::LinkShared { link: id, version });
+                }
+            }
+            // The other device takes this one's when it hears of it.
+            Incoming::KeepMine => watching.told_at = None,
+            Incoming::Take => self.fetch_link(link, None),
+            Incoming::TakeKeepingMine => {
+                let keep = linked::conflicted_copy(&link.path, &self.settings.name);
+                self.add_notice(
+                    format!(
+                        "{} changed here and on {}",
+                        file_name(&link.path),
+                        self.device_name(peer)
+                    ),
+                    format!(
+                        "Both are kept. This PC's version is now {}.",
+                        file_name(&keep)
+                    ),
+                );
+                self.fetch_link(link, Some(keep));
+            }
+        }
+    }
+
+    fn fetch_link(&mut self, link: linked::Link, keep_mine: Option<PathBuf>) {
+        if let Some(watching) = self.watching.get_mut(&link.id) {
+            watching.busy = true;
+        }
+        let runtime = Handle::current();
+        let links = self.links.clone();
+        let events = self.events.clone();
+        tokio::task::spawn_blocking(move || {
+            let result = linked_files::fetch(
+                &runtime,
+                &links,
+                link.peer,
+                link.id,
+                &link.path,
+                keep_mine.as_deref(),
+            );
+            let _ = events.send(Event::LinkFetched {
+                link: link.id,
+                result,
+            });
+        });
+    }
+
+    fn on_link_fetched(&mut self, id: ClipVersion, result: Result<linked_files::Fetched, String>) {
+        let Some(at) = self.linked.iter().position(|link| link.id == id) else {
+            return;
+        };
+        let watching = self.watching.entry(id).or_default();
+        watching.busy = false;
+        match result {
+            Ok(linked_files::Fetched::Done(version)) => {
+                watching.unshared = None;
+                watching.waiting = None;
+                self.linked[at].shared = version;
+                self.save_links();
+                if let Ok(session) = self.handoff_session(self.linked[at].peer) {
+                    let _ = session
+                        .outgoing
+                        .send(Message::LinkShared { link: id, version });
+                }
+                tracing::info!("a linked file now has the other device's changes");
+            }
+            Ok(linked_files::Fetched::Waiting { new, version }) => {
+                watching.waiting = Some((new, version));
+                let name = file_name(&self.linked[at].path);
+                self.add_notice(
+                    format!(
+                        "{name} changed on {}",
+                        self.device_name(self.linked[at].peer)
+                    ),
+                    format!("{name} is open here, so it's updated when it's closed."),
+                );
+            }
+            // The other device tells again, and it's tried again then.
+            Err(error) => tracing::warn!(error, "can't fetch a linked file's changes"),
+        }
+        self.take_up_offer(id);
+        self.notify();
+    }
+
+    fn on_link_requested(
+        &mut self,
+        peer: Fingerprint,
+        request: LinkRequest,
+        mut writer: DataWriter,
+    ) {
+        let path = self
+            .linked
+            .iter()
+            .find(|link| link.id == request.link && link.peer == peer)
+            .map(|link| link.path.clone());
+        tokio::spawn(async move {
+            let result = match path {
+                Some(path) => linked_files::answer(request.want, writer, path).await,
+                None => {
+                    let answer = LinkAnswer::Refused("that file isn't linked to this PC".into());
+                    match hk_proto::encode_link_answer(&answer) {
+                        Ok(bytes) => writer.write_message(&bytes).await.map_err(Into::into),
+                        Err(error) => Err(error.into()),
+                    }
+                }
+            };
+            if let Err(error) = result {
+                tracing::debug!(%error, "answering for a linked file ended early");
+            }
+        });
+    }
+
     fn apps_on(&self, device: Fingerprint, monitor: &Monitor) -> Vec<AppView> {
         let apps = if device == self.me {
             Some(&self.local_apps)
@@ -1918,7 +2567,12 @@ impl<P: Platform> Engine<P> {
         });
     }
 
-    fn send_files(&mut self, device: Fingerprint, paths: Vec<String>) {
+    fn send_files(
+        &mut self,
+        device: Fingerprint,
+        paths: Vec<String>,
+        handed_off: bool,
+    ) -> ClipVersion {
         let roots: Vec<PathBuf> = paths.into_iter().map(PathBuf::from).collect();
         let names: Vec<&str> = roots
             .iter()
@@ -1940,10 +2594,11 @@ impl<P: Platform> Engine<P> {
             folder: None,
             control: None,
             last_heard: Instant::now(),
+            handed_off,
         });
         self.notify();
         if self.transfers.last().is_some_and(|t| t.stage.is_over()) {
-            return;
+            return id;
         }
         // Going through a large folder takes a while.
         let events = self.events.clone();
@@ -1951,6 +2606,7 @@ impl<P: Platform> Engine<P> {
             let (files, paths) = files::list(&roots);
             let _ = events.send(Event::FilesListed { id, files, paths });
         });
+        id
     }
 
     fn on_files_listed(&mut self, id: ClipVersion, files: Vec<SharedFile>, paths: Vec<PathBuf>) {
@@ -1963,6 +2619,7 @@ impl<P: Platform> Engine<P> {
             return; // Cancelled meanwhile.
         };
         let peer = transfer.peer;
+        let handed_off = transfer.handed_off;
         transfer.total = files.iter().map(|file| file.size).sum();
         if files.is_empty() {
             transfer.stage = TransferStage::Failed {
@@ -1987,6 +2644,7 @@ impl<P: Platform> Engine<P> {
             data: ClipboardData::default(),
             files,
             save_to_folder: true,
+            open_when_saved: handed_off,
         };
         let events = self.events.clone();
         tokio::spawn(async move {
@@ -2011,7 +2669,13 @@ impl<P: Platform> Engine<P> {
         }
     }
 
-    fn on_files_offered(&mut self, peer: Fingerprint, id: ClipVersion, files: Vec<SharedFile>) {
+    fn on_files_offered(
+        &mut self,
+        peer: Fingerprint,
+        id: ClipVersion,
+        files: Vec<SharedFile>,
+        handed_off: bool,
+    ) {
         let refuse = |engine: &Self, reason: String| {
             tracing::info!(%peer, reason, "refused files sent to this PC");
             engine.tell_sender(peer, id, TransferUpdate::Failed(reason));
@@ -2036,17 +2700,27 @@ impl<P: Platform> Engine<P> {
             .is_some_and(|device| device.files_allowed);
         match self.settings.rules.receive_files {
             ReceiveFiles::Never => refuse(self, format!("{here} doesn't accept files")),
-            ReceiveFiles::AnyDevice => self.start_receiving(peer, id, files),
-            ReceiveFiles::AskFirst if allowed => self.start_receiving(peer, id, files),
+            ReceiveFiles::AnyDevice => self.start_receiving(peer, id, files, handed_off),
+            ReceiveFiles::AskFirst if allowed => self.start_receiving(peer, id, files, handed_off),
             ReceiveFiles::AskFirst | ReceiveFiles::Ask => {
-                self.incoming_files
-                    .push_back(IncomingFiles { id, peer, files });
+                self.incoming_files.push_back(IncomingFiles {
+                    id,
+                    peer,
+                    files,
+                    handed_off,
+                });
                 self.notify();
             }
         }
     }
 
-    fn start_receiving(&mut self, peer: Fingerprint, id: ClipVersion, files: Vec<SharedFile>) {
+    fn start_receiving(
+        &mut self,
+        peer: Fingerprint,
+        id: ClipVersion,
+        files: Vec<SharedFile>,
+        handed_off: bool,
+    ) {
         let control = Arc::new(TransferControl::default());
         let source = RemoteFiles {
             runtime: Handle::current(),
@@ -2056,7 +2730,7 @@ impl<P: Platform> Engine<P> {
             version: id,
             sizes: files.iter().map(|file| file.size).collect(),
         };
-        self.start_saving_with(peer, id, files, Arc::new(source), control);
+        self.start_saving_with(peer, id, files, Arc::new(source), control, handed_off);
     }
 
     fn start_saving(
@@ -2066,7 +2740,7 @@ impl<P: Platform> Engine<P> {
         files: Vec<SharedFile>,
         source: Arc<dyn FileSource>,
     ) {
-        self.start_saving_with(peer, id, files, source, Arc::default());
+        self.start_saving_with(peer, id, files, source, Arc::default(), false);
     }
 
     fn start_saving_with(
@@ -2076,12 +2750,17 @@ impl<P: Platform> Engine<P> {
         files: Vec<SharedFile>,
         source: Arc<dyn FileSource>,
         control: Arc<TransferControl>,
+        handed_off: bool,
     ) {
         let chosen = self.settings.rules.drop_folder.as_deref();
-        let folder = chosen
-            .filter(|folder| !folder.trim().is_empty())
-            .map(PathBuf::from)
-            .or_else(|| self.shared.platform.desktop_folder());
+        let folder = if handed_off {
+            self.shared.platform.handoff_folder()
+        } else {
+            chosen
+                .filter(|folder| !folder.trim().is_empty())
+                .map(PathBuf::from)
+                .or_else(|| self.shared.platform.desktop_folder())
+        };
         let label = files::describe(&files::top_level_names(&files));
         let total = files.iter().map(|file| file.size).sum();
         let stage = if folder.is_some() {
@@ -2112,6 +2791,7 @@ impl<P: Platform> Engine<P> {
                 folder: view_folder,
                 control: Some(control.clone()),
                 last_heard: Instant::now(),
+                handed_off,
             }),
         }
         self.notify();
@@ -2124,7 +2804,12 @@ impl<P: Platform> Engine<P> {
         self.tell_sender(peer, id, TransferUpdate::Accepted);
         tracing::info!(%peer, files = files.len(), total, folder = %folder.display(), "saving files");
 
-        let clash = self.settings.rules.name_clash;
+        // A handed-off file is a new copy to link, never in place of anything.
+        let clash = if handed_off {
+            NameClash::KeepBoth
+        } else {
+            self.settings.rules.name_clash
+        };
         let events = self.events.clone();
         tokio::task::spawn_blocking(move || {
             let result = files::save_all(&files, source.as_ref(), &folder, clash, &control);
@@ -2132,13 +2817,39 @@ impl<P: Platform> Engine<P> {
         });
     }
 
-    fn on_files_saved(&mut self, id: ClipVersion, result: Result<(), SaveError>) {
-        let Some(transfer) = self.transfers.iter_mut().find(|t| t.id == id) else {
+    fn on_files_saved(&mut self, id: ClipVersion, result: Result<Vec<PathBuf>, SaveError>) {
+        let Some(transfer) = self.transfers.iter().find(|t| t.id == id) else {
             return;
         };
         let peer = transfer.peer;
+        if transfer.handed_off
+            && let Ok(saved) = &result
+            && let Some(file) = saved.first().cloned()
+        {
+            let platform = self.shared.platform.clone();
+            let events = self.events.clone();
+            let from = self.device_name(peer);
+            tokio::task::spawn_blocking(move || {
+                let read = linked_files::version_of(&file)
+                    .map(|(version, _)| version)
+                    .map_err(|error| error.to_string());
+                let _ = events.send(Event::LinkMade {
+                    peer,
+                    link: id,
+                    path: file.clone(),
+                    read,
+                });
+                if let Err(text) = platform.open_file(&file) {
+                    let title = format!("Couldn't open what {from} handed off");
+                    let _ = events.send(Event::Notice { title, text });
+                }
+            });
+        }
+        let Some(transfer) = self.transfers.iter_mut().find(|t| t.id == id) else {
+            return;
+        };
         let update = match result {
-            Ok(()) => {
+            Ok(_) => {
                 transfer.done = transfer.total;
                 transfer.stage = TransferStage::Done;
                 TransferUpdate::Saved {
@@ -2241,7 +2952,7 @@ impl<P: Platform> Engine<P> {
         };
         let peer = incoming.peer;
         if accept {
-            self.start_receiving(peer, incoming.id, incoming.files);
+            self.start_receiving(peer, incoming.id, incoming.files, incoming.handed_off);
             if always {
                 self.set_files_allowed(peer, true);
             }
@@ -2267,7 +2978,7 @@ impl<P: Platform> Engine<P> {
                     .partition(|incoming| incoming.peer == device);
             self.incoming_files = others;
             for incoming in waiting {
-                self.start_receiving(device, incoming.id, incoming.files);
+                self.start_receiving(device, incoming.id, incoming.files, incoming.handed_off);
             }
         }
         self.notify();
@@ -2444,6 +3155,7 @@ impl<P: Platform> Engine<P> {
                     data,
                     files,
                     save_to_folder: false,
+                    open_when_saved: false,
                 };
                 anyhow::Ok(Some((hk_proto::encode_clipboard(&blob)?, count)))
             })
@@ -2486,6 +3198,7 @@ impl<P: Platform> Engine<P> {
                     peer,
                     id: blob.version,
                     files: blob.files,
+                    handed_off: blob.open_when_saved,
                 });
                 return;
             }
@@ -3143,6 +3856,19 @@ impl<P: Platform> Engine<P> {
             saved_layouts: self.layout.saved_count(),
             rival_programs: self.rivals.clone(),
             dev_notices: self.dev_notices.iter().cloned().collect(),
+            linked_files: self
+                .linked
+                .iter()
+                .map(|link| LinkedFileView {
+                    id: transfer_key(link.id),
+                    path: link.path.display().to_string(),
+                    peer_name: self.name_of(link.peer),
+                    waiting: self
+                        .watching
+                        .get(&link.id)
+                        .is_some_and(|w| w.waiting.is_some()),
+                })
+                .collect(),
         }
     }
 

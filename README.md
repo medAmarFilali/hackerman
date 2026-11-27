@@ -36,8 +36,10 @@ It also shares the clipboard (text, formatted text, images and files of any size
 keyboard shortcuts for jumping between computers and for keeping the cursor where it is, and
 can hold the cursor back during full-screen games or until you push against an edge.
 You can drop files on a screen to save them on that computer, see what's on each screen, and
-bring up apps or move them between screens from the canvas. One button turns all of it off on
-a computer, and there are light and dark themes.
+bring up apps or move them between screens from the canvas. Dragging an app onto another
+computer's screen opens the same page, folder or file there, and a file handed off that way
+stays the same on both. One button turns all of it off on a computer, and there are light and
+dark themes.
 
 For developers, an optional [developer mode](#developer-mode) shows what's using memory, ports
 and disk on each computer, stops leftover dev servers and Docker containers, and cleans up build
@@ -255,6 +257,37 @@ takes it back.
 **Show what's on the screens** in the same place turns the pictures off on this computer's canvas.
 A screen being looked at from here can't be clicked on, and a computer can't be used as an extra
 monitor for another: that takes a display driver, which is a project of its own.
+
+All the computers involved need this version.
+
+### Handing off to another computer
+
+Drag an app's icon from a screen on the canvas onto another computer's screen, and that computer
+opens what the app has open. It isn't the same window: a program can't move to another computer,
+so the other one opens the same thing, and the original stays open.
+
+| Drag | The other computer opens |
+|---|---|
+| Edge, Chrome, Brave, Vivaldi or Opera | The page of the tab in front, in the same browser if it has it, or its default one |
+| VS Code | The same project folder, if it's there at the same place, or at the same place in your own folder there |
+| File Explorer | The same folder, the same way |
+| Anything else with a file open | A copy of the file, in `Documents\Hackerman`, with its usual program |
+
+**A handed-off file stays the same on both computers.** Change it on either one, and once it's
+saved the change goes to the other. For a big file, only the parts that changed are sent. If
+it's open in a program there, like Word, it's updated when it's closed. If it was changed on
+both before either heard, both versions are kept: one as the file, the other beside it as
+`name (conflicted copy from PC)`. Nothing goes through a server.
+
+**Settings > Clipboard & files** lists the files kept the same, with a button to stop. Stopping,
+or deleting or moving either copy, leaves both as they are.
+
+- What isn't saved doesn't go: text typed into a page, undo history, a document never saved.
+- Working out which file an app has open looks at what it was started with and Windows' list
+  of recent files, and can miss. Hackerman then says so on that computer.
+- A file Windows would run as a program, like `.exe` or `.ps1`, is copied but never opened.
+- It follows **Settings > Apps & media** on both computers, and the file follows the other
+  computer's settings for receiving files, which may ask first.
 
 All the computers involved need this version.
 

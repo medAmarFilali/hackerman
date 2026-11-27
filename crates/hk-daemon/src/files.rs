@@ -221,6 +221,14 @@ async fn route(
             });
             Ok(())
         }
+        PeerRequest::Linked(request) => {
+            let _ = events.send(Event::LinkRequested {
+                peer,
+                request,
+                writer,
+            });
+            Ok(())
+        }
     }
 }
 
@@ -500,7 +508,8 @@ pub fn top_level_names(files: &[SharedFile]) -> Vec<&str> {
 
 /// Saves all of `files` into `folder`, creating it if necessary. Blocks until it's done,
 /// which can be a long time. An unfinished file has a temporary name, and goes away if
-/// this fails or is cancelled, so anything with its real name is complete.
+/// this fails or is cancelled, so anything with its real name is complete. Gives where each
+/// file was saved.
 ///
 /// The paths in `files` must already have been checked with
 /// [`SharedFile::has_safe_path`], if they came from another device.
@@ -510,12 +519,13 @@ pub fn save_all(
     folder: &Path,
     clash: NameClash,
     control: &TransferControl,
-) -> Result<(), SaveError> {
+) -> Result<Vec<PathBuf>, SaveError> {
     let failed = |what: &Path, error: io::Error| {
         SaveError::Failed(format!("can't write to {}: {error}", what.display()))
     };
     std::fs::create_dir_all(folder).map_err(|error| failed(folder, error))?;
     let new_names = new_top_level_names(files, folder, clash);
+    let mut saved = Vec::new();
 
     for (index, file) in files.iter().enumerate() {
         if control.is_cancelled() {
@@ -534,8 +544,9 @@ pub fn save_all(
             std::fs::create_dir_all(parent).map_err(|error| failed(parent, error))?;
         }
         save_file(index, file, source, &target, control)?;
+        saved.push(target);
     }
-    Ok(())
+    Ok(saved)
 }
 
 /// With keeping both, what's at the top of the list gets a new name if that name is
@@ -782,7 +793,7 @@ mod tests {
         contents: Vec<&'static [u8]>,
         folder: &Path,
         clash: NameClash,
-    ) -> Result<(), SaveError> {
+    ) -> Result<Vec<PathBuf>, SaveError> {
         let control = TransferControl::default();
         save_all(files, &Contents(contents), folder, clash, &control)
     }
@@ -820,7 +831,12 @@ mod tests {
         for (round, name) in [(1, "report (1).pdf"), (2, "report (2).pdf")] {
             std::fs::write(folder.join("report.pdf"), "old").unwrap();
             std::fs::write(folder.join("notes"), "old").unwrap();
-            save(&files, vec![b"new", b"new"], &folder, NameClash::KeepBoth).unwrap();
+            let saved = save(&files, vec![b"new", b"new"], &folder, NameClash::KeepBoth).unwrap();
+            assert_eq!(
+                saved[0],
+                folder.join(name),
+                "where it really went, to open it"
+            );
             assert_eq!(read(folder.join(name)), "new", "round {round}");
             assert_eq!(read(folder.join("report.pdf")), "old");
         }

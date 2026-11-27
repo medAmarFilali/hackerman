@@ -224,6 +224,7 @@ mod tests {
             saved_layouts: 1,
             rival_programs: vec![],
             dev_notices: vec![],
+            linked_files: vec![],
         }
     }
 

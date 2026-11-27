@@ -3,7 +3,7 @@ resolver = "3"
 members = ["crates/*", "app/src-tauri"]
 
 [workspace.package]
-version = "0.12.0"
+version = "0.13.0"
 edition = "2024"
 rust-version = "1.88"
 license = "MIT OR Apache-2.0"
@@ -35,6 +35,7 @@ ring = "0.17.14"
 rustls = { version = "0.23.46", default-features = false, features = ["ring", "std"] }
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.154"
+sha2 = "0.10.9"
 spake2 = "0.4.0"
 thiserror = "2.0.21"
 tokio = { version = "1.54.1", features = ["fs", "io-util", "macros", "net", "rt-multi-thread", "signal", "sync", "time"] }
@@ -75,8 +76,18 @@ windows = { version = "0.62.2", features = [
     "Win32_System_StationsAndDesktops",
     "Win32_System_SystemInformation",
     "Win32_System_Threading",
+    "Win32_System_Variant",
+    "Win32_UI_Accessibility",
     "Win32_UI_HiDpi",
     "Win32_UI_Input_KeyboardAndMouse",
     "Win32_UI_Shell",
     "Win32_UI_WindowsAndMessaging",
 ] }
+
+# Cutting linked files into pieces reads every byte, which is very slow unoptimized, and the
+# tests do it to files of several megabytes alongside tests that measure how fast input goes.
+[profile.dev.package.hk-core]
+opt-level = 3
+
+[profile.dev.package.sha2]
+opt-level = 3

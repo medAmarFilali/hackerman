@@ -9,6 +9,7 @@ mod config;
 mod dev;
 mod engine;
 mod files;
+mod linked_files;
 pub mod lock_screen;
 mod pairing;
 mod screens;

@@ -1,13 +1,14 @@
 //! A simulated machine, for testing everything above the operating system.
 
 use std::io::Read;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
 use hk_core::apps::{AppAction, MediaCommand, RunningApp};
 use hk_core::clipboard::{ClipboardData, SharedFile};
 use hk_core::dev::{CleanResult, DevReply, DevRequest, ProgramsReport, ToolVersion};
 use hk_core::geometry::{Point, Rect};
+use hk_core::handoff::{Found, Opening};
 use hk_core::input::InputEvent;
 use hk_core::layout::Monitor;
 use hk_core::screens::ScreenImage;
@@ -52,6 +53,11 @@ struct State {
     /// Developer mode: what's running here, and every request it was asked.
     dev_programs: ProgramsReport,
     dev_requests: Vec<(DevRequest, Vec<PathBuf>)>,
+    /// What each app has open, if a test has said, and what was opened here.
+    open_in: Vec<(String, Found)>,
+    opened: Vec<Opening>,
+    opened_files: Vec<PathBuf>,
+    handoff_folder: Option<PathBuf>,
 }
 
 type ClipboardWatcher = Box<dyn FnMut() + Send>;
@@ -129,6 +135,24 @@ impl FakePlatform {
     /// Every developer mode request this machine was asked, with the folders to look in.
     pub fn dev_requests(&self) -> Vec<(DevRequest, Vec<PathBuf>)> {
         self.state().dev_requests.clone()
+    }
+
+    /// What handing off this app finds it has open.
+    pub fn set_open_in(&self, app: &str, found: Found) {
+        self.state().open_in.push((app.to_string(), found));
+    }
+
+    pub fn set_handoff_folder(&self, folder: PathBuf) {
+        self.state().handoff_folder = Some(folder);
+    }
+
+    /// What other computers handed off and was opened here.
+    pub fn opened(&self) -> Vec<Opening> {
+        self.state().opened.clone()
+    }
+
+    pub fn opened_files(&self) -> Vec<PathBuf> {
+        self.state().opened_files.clone()
     }
 
     /// Says what some of its monitors are, as monitors with a serial number do.
@@ -425,6 +449,28 @@ impl Platform for FakePlatform {
                 || test_pattern(monitor, frame),
                 |(_, picture)| picture.clone(),
             ))
+    }
+
+    fn what_is_open(&self, app: &str, _monitor: Option<&str>) -> Result<Found, String> {
+        let state = self.state();
+        let found = state.open_in.iter().rev().find(|(open, _)| open == app);
+        found
+            .map(|(_, found)| found.clone())
+            .ok_or_else(|| format!("couldn't tell what {app} has open"))
+    }
+
+    fn open(&self, opening: &Opening) -> Result<(), String> {
+        self.state().opened.push(opening.clone());
+        Ok(())
+    }
+
+    fn open_file(&self, file: &Path) -> Result<(), String> {
+        self.state().opened_files.push(file.to_path_buf());
+        Ok(())
+    }
+
+    fn handoff_folder(&self) -> Option<PathBuf> {
+        self.state().handoff_folder.clone()
     }
 
     /// Programs from [`FakePlatform::set_dev_programs`], stopped by taking them off the list.

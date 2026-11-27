@@ -70,6 +70,7 @@ function stateWith(change: Partial<UiState> = {}): UiState {
     savedLayouts: 1,
     rivalPrograms: [],
     devNotices: [],
+    linkedFiles: [],
     ...change,
   };
 }

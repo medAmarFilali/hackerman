@@ -30,6 +30,8 @@ export type Request =
   | { type: "mediaCommand"; device: Fingerprint; app: string; command: MediaCommand }
   | { type: "recordingShortcut"; active: boolean }
   | { type: "appAction"; device: Fingerprint; app: string; action: AppAction }
+  | { type: "handOff"; device: Fingerprint; app: string; monitor: string; to: Fingerprint }
+  | { type: "stopLink"; id: string }
   | { type: "setScreensAllowed"; device: Fingerprint; allowed: boolean }
   /** A monitor plugged into more than one PC is showing this one now. */
   | { type: "showOnMonitor"; hardware: string; device: Fingerprint }
@@ -269,8 +271,18 @@ export interface UiState {
   savedLayouts: number;
   /** Other programs running here that share the keyboard and mouse too. */
   rivalPrograms: string[];
-  /** The latest things to tell the user about developer mode, oldest first. */
+  /** The latest things to tell the user, oldest first: from developer mode, and about handing off. */
   devNotices: DevNotice[];
+  /** Handed-off files here kept the same as a copy on another PC. */
+  linkedFiles: LinkedFile[];
+}
+
+export interface LinkedFile {
+  id: string;
+  path: string;
+  peerName: string;
+  /** A new version from the other PC waits for a program here to close the file. */
+  waiting: boolean;
 }
 
 // Developer mode. These match hk_core::dev.

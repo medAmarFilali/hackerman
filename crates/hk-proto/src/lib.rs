@@ -5,8 +5,11 @@
 use hk_core::apps::{AppAction, MediaCommand, RunningApp};
 use hk_core::clipboard::{ClipVersion, ClipboardData, SharedFile};
 use hk_core::dev::{DevReply, DevRequest, MemoryAlert};
+use hk_core::device::Fingerprint;
+use hk_core::handoff::Opening;
 use hk_core::input::InputEvent;
 use hk_core::layout::{LayoutDoc, Monitor};
+use hk_core::linked::{FileVersion, Piece};
 use hk_core::shared_monitors::{MonitorIdentity, Showing};
 use serde::{Deserialize, Serialize};
 
@@ -51,6 +54,9 @@ pub const FEATURE_SHARED_MONITORS: u32 = 1 << 6;
 /// programs and clean up, if its user allows the device asking.
 pub const FEATURE_DEVELOPER: u32 = 1 << 7;
 
+/// Can hand off what an app has open to another device, and open what's handed off to it.
+pub const FEATURE_HANDOFF: u32 = 1 << 8;
+
 /// Everything this version can do beyond the base protocol, for [`Message::Hello`].
 pub const FEATURES: u32 = FEATURE_FILES
     | FEATURE_SEND_FILES
@@ -59,7 +65,8 @@ pub const FEATURES: u32 = FEATURE_FILES
     | FEATURE_SCREENS
     | FEATURE_APP_ACTIONS
     | FEATURE_SHARED_MONITORS
-    | FEATURE_DEVELOPER;
+    | FEATURE_DEVELOPER
+    | FEATURE_HANDOFF;
 
 /// A message sent from one peer to another.
 ///
@@ -145,6 +152,33 @@ pub enum Message {
     /// A program on the sender is using more memory than its user said is too much. Needs
     /// [`FEATURE_DEVELOPER`].
     MemoryAlert(MemoryAlert),
+    /// Asks the receiver to hand off what this app's frontmost window on that monitor has open,
+    /// to the device `to`. Needs [`FEATURE_HANDOFF`].
+    HandOff {
+        app: String,
+        monitor: Option<String>,
+        to: Fingerprint,
+    },
+    /// Something an app on the sender had open, for the receiver to open. Needs
+    /// [`FEATURE_HANDOFF`].
+    Open(Opening),
+    /// The sender's copy of a linked file is now this version, which both now have. The receiver
+    /// of a handed-off file says so once it's saved, which makes the link. Needs
+    /// [`FEATURE_HANDOFF`].
+    LinkShared {
+        link: ClipVersion,
+        version: FileVersion,
+    },
+    /// The sender's copy of a linked file changed to this version, which the receiver can fetch
+    /// with a [`LinkRequest`]. Needs [`FEATURE_HANDOFF`].
+    LinkChanged {
+        link: ClipVersion,
+        version: FileVersion,
+    },
+    /// The sender stopped keeping a linked file the same. Needs [`FEATURE_HANDOFF`].
+    LinkEnded {
+        link: ClipVersion,
+    },
 }
 
 /// See [`Message::Transfer`].
@@ -174,6 +208,9 @@ pub struct ClipboardBlob {
     /// These files are to be saved in the receiver's folder for that, rather than going
     /// on its clipboard. Only for a peer with [`FEATURE_SEND_FILES`].
     pub save_to_folder: bool,
+    /// These files were handed off, so they're saved in the receiver's folder for that, and
+    /// opened. Only for a peer with [`FEATURE_HANDOFF`].
+    pub open_when_saved: bool,
 }
 
 /// Asks the owner of a clipboard for the content of one of its files. Sent on a stream
@@ -237,7 +274,41 @@ pub enum ScreenAnswer {
 pub enum PeerRequest {
     File(FileRequest),
     Screen(ScreenRequest),
+    Linked(LinkRequest),
 }
+
+/// Asks for the receiver's copy of a linked file, after a [`Message::LinkChanged`]. Sent on a
+/// stream of its own, which the [`LinkAnswer`] comes back on. Needs [`FEATURE_HANDOFF`].
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LinkRequest {
+    pub link: ClipVersion,
+    pub want: LinkWant,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum LinkWant {
+    /// Which pieces it's made of now.
+    Pieces,
+    /// These parts of it, as places and lengths, if it's still this version.
+    Bytes {
+        version: FileVersion,
+        ranges: Vec<(u64, u64)>,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum LinkAnswer {
+    /// Its pieces follow, made with [`encode_pieces`], until the stream ends. A large file has
+    /// too many for a message.
+    Pieces {
+        version: FileVersion,
+    },
+    /// The parts asked for follow, one after the other, until the stream ends.
+    Bytes,
+    Refused(String),
+}
+
+const LINK_REQUEST_MARK: &[u8] = b"HKLINKED";
 
 /// What a [`ScreenRequest`] starts with. A [`FileRequest`] has no such thing at its start, as
 /// older versions send them. It can only begin like this with a copy counter of 72, where
@@ -319,12 +390,14 @@ pub fn decode_clipboard(bytes: &[u8]) -> Result<ClipboardBlob, CodecError> {
     let (version, rest) = postcard::take_from_bytes(bytes)?;
     let (data, rest) = postcard::take_from_bytes(rest)?;
     let (files, rest) = take_if_present(rest)?;
-    let (save_to_folder, _) = take_if_present(rest)?;
+    let (save_to_folder, rest) = take_if_present(rest)?;
+    let (open_when_saved, _) = take_if_present(rest)?;
     Ok(ClipboardBlob {
         version,
         data,
         files,
         save_to_folder,
+        open_when_saved,
     })
 }
 
@@ -343,10 +416,35 @@ pub fn encode_screen_request(request: &ScreenRequest) -> Result<Vec<u8>, CodecEr
 }
 
 pub fn decode_peer_request(bytes: &[u8]) -> Result<PeerRequest, CodecError> {
+    if let Some(request) = bytes.strip_prefix(LINK_REQUEST_MARK) {
+        return Ok(PeerRequest::Linked(postcard::from_bytes(request)?));
+    }
     match bytes.strip_prefix(SCREEN_REQUEST_MARK) {
         Some(request) => Ok(PeerRequest::Screen(postcard::from_bytes(request)?)),
         None => Ok(PeerRequest::File(decode_file_request(bytes)?)),
     }
+}
+
+pub fn encode_link_request(request: &LinkRequest) -> Result<Vec<u8>, CodecError> {
+    let mut bytes = LINK_REQUEST_MARK.to_vec();
+    bytes.extend(postcard::to_allocvec(request)?);
+    Ok(bytes)
+}
+
+pub fn encode_link_answer(answer: &LinkAnswer) -> Result<Vec<u8>, CodecError> {
+    Ok(postcard::to_allocvec(answer)?)
+}
+
+pub fn decode_link_answer(bytes: &[u8]) -> Result<LinkAnswer, CodecError> {
+    Ok(postcard::from_bytes(bytes)?)
+}
+
+pub fn encode_pieces(pieces: &[Piece]) -> Result<Vec<u8>, CodecError> {
+    Ok(postcard::to_allocvec(pieces)?)
+}
+
+pub fn decode_pieces(bytes: &[u8]) -> Result<Vec<Piece>, CodecError> {
+    Ok(postcard::from_bytes(bytes)?)
 }
 
 pub fn encode_screen_answer(answer: &ScreenAnswer) -> Result<Vec<u8>, CodecError> {
@@ -394,6 +492,7 @@ mod tests {
                 modified_ms: Some(1_700_000_000_000),
             }],
             save_to_folder: true,
+            open_when_saved: true,
         };
         let bytes = encode_clipboard(&blob).unwrap();
         assert_eq!(decode_clipboard(&bytes).unwrap(), blob);
@@ -473,6 +572,74 @@ mod tests {
                 action,
             };
             assert_eq!(decode(&encode(&message).unwrap()).unwrap(), message);
+        }
+    }
+
+    #[test]
+    fn handing_off_round_trips() {
+        round_trip(Message::HandOff {
+            app: "msedge".into(),
+            monitor: Some(r"\\?\DISPLAY#DEL41AB".into()),
+            to: Fingerprint::from_bytes([7; 32]),
+        });
+        for opening in [
+            Opening::Page {
+                address: "https://example.com/é".into(),
+                browser: "msedge".into(),
+            },
+            Opening::Project {
+                folder: r"C:\code\x".into(),
+            },
+            Opening::Folder {
+                folder: r"D:\photos".into(),
+            },
+        ] {
+            round_trip(Message::Open(opening));
+        }
+    }
+
+    #[test]
+    fn linked_files_round_trip() {
+        let link = ClipVersion {
+            counter: 9,
+            owner: Fingerprint::from_bytes([4; 32]),
+        };
+        let version = FileVersion {
+            size: 5_000_000_000,
+            hash: [8; 32],
+        };
+        round_trip(Message::LinkShared { link, version });
+        round_trip(Message::LinkChanged { link, version });
+        round_trip(Message::LinkEnded { link });
+        for want in [
+            LinkWant::Pieces,
+            LinkWant::Bytes {
+                version,
+                ranges: vec![(0, 10), (4_000_000_000, 1)],
+            },
+        ] {
+            let request = LinkRequest { link, want };
+            let bytes = encode_link_request(&request).unwrap();
+            assert_eq!(
+                decode_peer_request(&bytes).unwrap(),
+                PeerRequest::Linked(request)
+            );
+        }
+        let pieces = vec![Piece {
+            hash: [1; 32],
+            len: 7,
+        }];
+        assert_eq!(
+            decode_pieces(&encode_pieces(&pieces).unwrap()).unwrap(),
+            pieces
+        );
+        for answer in [
+            LinkAnswer::Pieces { version },
+            LinkAnswer::Bytes,
+            LinkAnswer::Refused("no".into()),
+        ] {
+            let bytes = encode_link_answer(&answer).unwrap();
+            assert_eq!(decode_link_answer(&bytes).unwrap(), answer);
         }
     }
 
@@ -820,12 +987,14 @@ mod tests {
         let read = decode_clipboard(&from_old).unwrap();
         assert_eq!(read.data, data);
         assert!(read.files.is_empty());
+        assert!(!read.open_when_saved);
 
         let from_new = encode_clipboard(&ClipboardBlob {
             version,
             data: data.clone(),
             files: vec![],
             save_to_folder: false,
+            open_when_saved: false,
         })
         .unwrap();
         let read: version_0_4::ClipboardBlob = postcard::from_bytes(&from_new).unwrap();
